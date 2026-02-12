@@ -323,7 +323,7 @@ export default function OrderPage() {
               Clubhouse Kitchen
             </div>
             <div style={{ opacity: 0.85, marginTop: 3 }}>
-              Order, get a number, collect at the counter when{" "}
+              Order, get a number, collect at the kitchen when{" "}
               <b>READY</b>.
             </div>
           </div>
@@ -456,7 +456,7 @@ export default function OrderPage() {
                   </div>
 
                   <div style={{ marginTop: 8, fontSize: 18, fontWeight: 900 }}>
-                    Please collect at the counter now ✅
+                    Please collect at the kitchen now ✅
                   </div>
 
                   <div style={{ marginTop: 8, fontSize: 13, opacity: 0.95 }}>
@@ -832,7 +832,7 @@ export default function OrderPage() {
               </button>
 
               <div style={{ marginTop: 10, color: "#666", fontSize: 12 }}>
-                You’ll receive an order number and collect at the counter when{" "}
+                You’ll receive an order number and collect at the kitchen when{" "}
                 <b>READY</b>.
               </div>
 
