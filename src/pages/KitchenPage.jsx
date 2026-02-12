@@ -8,8 +8,6 @@ function money(cents) {
   return `R${(cents / 100).toFixed(2)}`;
 }
 
-const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready"];
-
 export default function KitchenPage() {
   const nav = useNavigate();
   const [session, setSession] = useState(null);
@@ -78,31 +76,13 @@ export default function KitchenPage() {
   async function load() {
     setErr("");
 
-    const { data, error } = await supabase
-      .from("orders")
-      .select(
-        `
-        id,
-        order_number,
-        order_type,
-        customer_name,
-        status,
-        created_at,
-        order_items (
-          id,
-          qty,
-          item_notes,
-          unit_price_cents,
-          menu_items ( name )
-        )
-      `
-      )
-      .in("status", ACTIVE_STATUSES)
-      .order("created_at", { ascending: true });
-
+    const { data, error } = await supabase.rpc("staff_list_active_orders");
     if (error) return setErr(error.message);
 
-    const nextOrders = data || [];
+    const nextOrders = (data || []).map((o) => ({
+      ...o,
+      order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
+    }));
 
     // Ding for NEW queued orders only
     if (soundOn) {
@@ -126,7 +106,7 @@ export default function KitchenPage() {
     setOrders(nextOrders);
   }
 
-  // Poll for updates (simple + reliable for MVP)
+  // Poll for updates
   useEffect(() => {
     if (!session) return;
     load();
@@ -176,8 +156,7 @@ export default function KitchenPage() {
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <button
             onClick={() => {
-              // user gesture to enable audio
-              initSound();
+              initSound(); // user gesture enables audio
               const next = !soundOn;
               setSoundOn(next);
               localStorage.setItem("kitchen_sound", next ? "1" : "0");
@@ -242,7 +221,7 @@ export default function KitchenPage() {
                           <b>{it.qty}×</b> {it.menu_items?.name}
                           {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
                         </div>
-                        <div style={{ color: "#666", fontSize: 12 }}>{money(it.unit_price_cents * it.qty)}</div>
+                        <div style={{ color: "#666", fontSize: 12 }}>{money((it.unit_price_cents || 0) * (it.qty || 0))}</div>
                       </div>
                     ))}
                   </div>

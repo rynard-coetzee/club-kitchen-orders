@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
-const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready"];
 const COLUMNS = ["queued", "accepted", "preparing", "ready"];
 
 function minutesAgo(dateStr) {
@@ -118,30 +117,13 @@ export default function WaiterPage() {
   async function load() {
     setErr("");
 
-    const { data, error } = await supabase
-      .from("orders")
-      .select(
-        `
-        id,
-        order_number,
-        order_type,
-        customer_name,
-        status,
-        created_at,
-        order_items (
-          id,
-          qty,
-          item_notes,
-          menu_items ( name )
-        )
-      `
-      )
-      .in("status", ACTIVE_STATUSES)
-      .order("created_at", { ascending: true });
-
+    const { data, error } = await supabase.rpc("staff_list_active_orders");
     if (error) return setErr(error.message);
 
-    const nextOrders = data || [];
+    const nextOrders = (data || []).map((o) => ({
+      ...o,
+      order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
+    }));
 
     // Sound: ding when order transitions to READY
     if (soundOn) {
