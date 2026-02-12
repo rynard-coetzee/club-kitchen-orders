@@ -1,7 +1,8 @@
 // src/pages/WaiterPage.jsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
+import { ding, initSound } from "../lib/sound";
 
 const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready"];
 const COLUMNS = ["queued", "accepted", "preparing", "ready"];
@@ -34,13 +35,8 @@ function chipStyle(status) {
 }
 
 function overdueCardStyle(mins) {
-  // >=15 min = amber, >=25 min = red
-  if (mins >= 25) {
-    return { borderColor: "#fecaca", background: "#fff1f2" };
-  }
-  if (mins >= 15) {
-    return { borderColor: "#fde68a", background: "#fffbeb" };
-  }
+  if (mins >= 25) return { borderColor: "#fecaca", background: "#fff1f2" };
+  if (mins >= 15) return { borderColor: "#fde68a", background: "#fffbeb" };
   return { borderColor: "#e5e5e5", background: "white" };
 }
 
@@ -52,6 +48,10 @@ export default function WaiterPage() {
 
   const [compact, setCompact] = useState(false);
 
+  // sound
+  const [soundOn, setSoundOn] = useState(() => localStorage.getItem("waiter_sound") === "1");
+  const prevStatusMapRef = useRef(new Map()); // orderId -> lastStatus
+
   // Default compact mode on small screens
   useEffect(() => {
     const decide = () => setCompact(window.innerWidth < 900);
@@ -60,26 +60,68 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
-  // Require login
+  // Require login + ROLE gate (waiter only)
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session || null);
-      if (!data.session) nav("/login");
-    });
+    let alive = true;
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+    async function check() {
+      const { data } = await supabase.auth.getSession();
+      const s = data.session || null;
+      if (!alive) return;
+
       setSession(s);
-      if (!s) nav("/login");
+      if (!s) {
+        nav("/login");
+        return;
+      }
+
+      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
+      if (roleErr) {
+        nav("/login");
+        return;
+      }
+
+      const r = String(role || "").trim().toLowerCase();
+      if (r !== "waiter") {
+        nav("/kitchen", { replace: true });
+        return;
+      }
+    }
+
+    check();
+
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
+      setSession(s);
+      if (!s) {
+        nav("/login");
+        return;
+      }
+
+      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
+      if (roleErr) {
+        nav("/login");
+        return;
+      }
+
+      const r = String(role || "").trim().toLowerCase();
+      if (r !== "waiter") {
+        nav("/kitchen", { replace: true });
+      }
     });
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      alive = false;
+      sub.subscription.unsubscribe();
+    };
   }, [nav]);
 
   async function load() {
     setErr("");
+
     const { data, error } = await supabase
       .from("orders")
-      .select(`
+      .select(
+        `
         id,
         order_number,
         order_type,
@@ -92,12 +134,39 @@ export default function WaiterPage() {
           item_notes,
           menu_items ( name )
         )
-      `)
+      `
+      )
       .in("status", ACTIVE_STATUSES)
       .order("created_at", { ascending: true });
 
     if (error) return setErr(error.message);
-    setOrders(data || []);
+
+    const nextOrders = data || [];
+
+    // Sound: ding when order transitions to READY
+    if (soundOn) {
+      const prevMap = prevStatusMapRef.current;
+
+      for (const o of nextOrders) {
+        const prev = String(prevMap.get(o.id) || "").trim().toLowerCase();
+        const now = String(o.status || "").trim().toLowerCase();
+
+        if (now === "ready" && prev && prev !== "ready") {
+          initSound();
+          ding();
+        }
+
+        prevMap.set(o.id, now);
+      }
+    } else {
+      // keep map updated so turning sound on doesn't ding for everything
+      const prevMap = prevStatusMapRef.current;
+      for (const o of nextOrders) {
+        prevMap.set(o.id, String(o.status || "").trim().toLowerCase());
+      }
+    }
+
+    setOrders(nextOrders);
   }
 
   useEffect(() => {
@@ -105,7 +174,8 @@ export default function WaiterPage() {
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, [session]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, soundOn]);
 
   const ordersWithAge = useMemo(() => {
     return (orders || []).map((o) => ({
@@ -124,7 +194,6 @@ export default function WaiterPage() {
   }, [ordersWithAge]);
 
   const flatSorted = useMemo(() => {
-    // For compact mode: sort by status order then oldest first
     const statusRank = new Map(COLUMNS.map((s, i) => [s, i]));
     return [...ordersWithAge].sort((a, b) => {
       const ra = statusRank.get(a.status) ?? 999;
@@ -140,13 +209,33 @@ export default function WaiterPage() {
 
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 1200, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: 0 }}>Waiter View</h1>
           <div style={{ color: "#666", marginTop: 4 }}>Track all active orders and their status.</div>
         </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button
+            onClick={() => {
+              initSound();
+              const next = !soundOn;
+              setSoundOn(next);
+              localStorage.setItem("waiter_sound", next ? "1" : "0");
+            }}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              background: soundOn ? "#111" : "white",
+              color: soundOn ? "white" : "#111",
+              fontWeight: 900,
+              cursor: "pointer",
+            }}
+          >
+            {soundOn ? "Sound: ON" : "Sound: OFF"}
+          </button>
+
           <button
             onClick={() => setCompact((v) => !v)}
             style={{
