@@ -83,7 +83,7 @@ export default function KitchenPage() {
 
   async function load() {
     setErr("");
-    const { data, error } = await supabase.rpc("staff_list_active_orders");
+    const { data, error } = await supabase.rpc("staff_list_active_orders", {p_bust: Date.now(),});
     if (error) return setErr(error.message);
 
     const nextOrders = (data || []).map((o) => ({
@@ -167,11 +167,15 @@ export default function KitchenPage() {
   async function logout() {
     setErr("");
     try {
-      const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
-      if (error) setErr(error.message);
-      nav("/login", { replace: true });
+      // don't timeout logout; just attempt it
+      await supabase.auth.signOut();
     } catch (e) {
-      setErr(e?.message || "Logout failed.");
+      // ignore logout failures — we still route away
+      console.warn("signOut failed:", e);
+    } finally {
+      // clear local staff toggles (optional)
+      // localStorage.removeItem("kitchen_sound");
+      nav("/login", { replace: true });
     }
   }
 

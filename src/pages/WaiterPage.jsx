@@ -118,7 +118,7 @@ export default function WaiterPage() {
   async function load() {
     setErr("");
 
-    const { data, error } = await supabase.rpc("staff_list_active_orders");
+    const { data, error } = await supabase.rpc("staff_list_active_orders", {p_bust: Date.now(),});
     if (error) return setErr(error.message);
 
     const nextOrders = data || [];
