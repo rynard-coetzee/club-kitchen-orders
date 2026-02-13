@@ -13,10 +13,11 @@ export default function KitchenPage() {
   const [session, setSession] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
   // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("kitchen_sound") === "1");
-  const seenQueuedRef = useRef(new Set()); // order ids we've already dinged for
+  const seenQueuedRef = useRef(new Set());
 
   // Auth gate + ROLE gate (kitchen only)
   useEffect(() => {
@@ -42,7 +43,6 @@ export default function KitchenPage() {
       const r = String(role || "").trim().toLowerCase();
       if (r !== "kitchen") {
         nav("/waiter", { replace: true });
-        return;
       }
     }
 
@@ -62,9 +62,7 @@ export default function KitchenPage() {
       }
 
       const r = String(role || "").trim().toLowerCase();
-      if (r !== "kitchen") {
-        nav("/waiter", { replace: true });
-      }
+      if (r !== "kitchen") nav("/waiter", { replace: true });
     });
 
     return () => {
@@ -75,7 +73,6 @@ export default function KitchenPage() {
 
   async function load() {
     setErr("");
-
     const { data, error } = await supabase.rpc("staff_list_active_orders");
     if (error) return setErr(error.message);
 
@@ -96,7 +93,6 @@ export default function KitchenPage() {
         }
       }
 
-      // Cleanup: remove ids that are no longer queued
       for (const id of Array.from(seen)) {
         const stillQueued = nextOrders.some((o) => o.id === id && o.status === "queued");
         if (!stillQueued) seen.delete(id);
@@ -125,17 +121,35 @@ export default function KitchenPage() {
   }, [orders]);
 
   async function setStatus(orderId, newStatus) {
+    if (busy) return;
     setErr("");
-    const { error } = await supabase.rpc("kitchen_set_status", {
-      p_order_id: orderId,
-      p_new_status: newStatus,
-    });
-    if (error) setErr(error.message);
-    else load();
+    setBusy(true);
+
+    try {
+      const { error } = await supabase.rpc("kitchen_set_status", {
+        p_order_id: orderId,
+        p_new_status: newStatus,
+      });
+
+      if (error) setErr(error.message);
+      else await load();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function logout() {
-    await supabase.auth.signOut();
+    if (busy) return;
+    setErr("");
+    setBusy(true);
+
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) setErr(error.message);
+      nav("/login", { replace: true });
+    } finally {
+      setBusy(false);
+    }
   }
 
   const columns = ["queued", "accepted", "preparing", "ready"];
@@ -155,8 +169,9 @@ export default function KitchenPage() {
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <button
+            type="button"
             onClick={() => {
-              initSound(); // user gesture enables audio
+              initSound();
               const next = !soundOn;
               setSoundOn(next);
               localStorage.setItem("kitchen_sound", next ? "1" : "0");
@@ -174,7 +189,12 @@ export default function KitchenPage() {
             {soundOn ? "Sound: ON" : "Sound: OFF"}
           </button>
 
-          <button onClick={logout} style={{ padding: "8px 12px", borderRadius: 10 }}>
+          <button
+            type="button"
+            onClick={logout}
+            style={{ padding: "8px 12px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+            disabled={busy}
+          >
             Logout
           </button>
         </div>
@@ -219,34 +239,58 @@ export default function KitchenPage() {
                       <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                         <div>
                           <b>{it.qty}×</b> {it.menu_items?.name}
-                          {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
+                          {it.item_notes ? (
+                            <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
+                          ) : null}
                         </div>
-                        <div style={{ color: "#666", fontSize: 12 }}>{money((it.unit_price_cents || 0) * (it.qty || 0))}</div>
+                        <div style={{ color: "#666", fontSize: 12 }}>
+                          {money((it.unit_price_cents || 0) * (it.qty || 0))}
+                        </div>
                       </div>
                     ))}
                   </div>
 
                   <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                     {st === "queued" && (
-                      <button onClick={() => setStatus(o.id, "accepted")} style={{ padding: "6px 10px", borderRadius: 10 }}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setStatus(o.id, "accepted")}
+                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                      >
                         Accept
                       </button>
                     )}
 
                     {st === "accepted" && (
-                      <button onClick={() => setStatus(o.id, "preparing")} style={{ padding: "6px 10px", borderRadius: 10 }}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setStatus(o.id, "preparing")}
+                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                      >
                         Start Prep
                       </button>
                     )}
 
                     {st === "preparing" && (
-                      <button onClick={() => setStatus(o.id, "ready")} style={{ padding: "6px 10px", borderRadius: 10 }}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setStatus(o.id, "ready")}
+                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                      >
                         Ready
                       </button>
                     )}
 
                     {st === "ready" && (
-                      <button onClick={() => setStatus(o.id, "completed")} style={{ padding: "6px 10px", borderRadius: 10 }}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setStatus(o.id, "completed")}
+                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                      >
                         Complete
                       </button>
                     )}
