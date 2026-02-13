@@ -205,6 +205,22 @@ export default function KitchenPage() {
             + New Order
           </button>
 
+          {/* ✅ Reports */}
+          <button
+            type="button"
+            onClick={() => nav("/reports")}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              background: "white",
+              fontWeight: 900,
+              cursor: "pointer",
+            }}
+          >
+            Reports
+          </button>
+
           <button
             type="button"
             onClick={() => {

@@ -3,6 +3,7 @@ import OrderPage from "./pages/OrderPage";
 import KitchenPage from "./pages/KitchenPage";
 import WaiterPage from "./pages/WaiterPage";
 import LoginPage from "./pages/LoginPage";
+import ReportsPage from "./pages/ReportsPage";
 
 export default function App() {
   return (
@@ -13,6 +14,7 @@ export default function App() {
       <Route path="/kitchen" element={<KitchenPage />} />
       <Route path="/waiter" element={<WaiterPage />} />
       <Route path="*" element={<div style={{ padding: 16 }}>Not found</div>} />
+      <Route path="/reports" element={<ReportsPage />} />
     </Routes>
   );
 }
