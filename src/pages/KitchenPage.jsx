@@ -8,12 +8,20 @@ function money(cents) {
   return `R${(cents / 100).toFixed(2)}`;
 }
 
+function withTimeout(promise, ms, message = "Request timed out. Please try again.") {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
+
 export default function KitchenPage() {
   const nav = useNavigate();
   const [session, setSession] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busyOrderId, setBusyOrderId] = useState(null); // ✅ per-order busy (better UX)
 
   // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("kitchen_sound") === "1");
@@ -120,35 +128,50 @@ export default function KitchenPage() {
     return map;
   }, [orders]);
 
+  // ✅ Optimistic move + timeout protected RPC
   async function setStatus(orderId, newStatus) {
-    if (busy) return;
+    if (busyOrderId) return;
     setErr("");
-    setBusy(true);
+    setBusyOrderId(orderId);
+
+    // optimistic update so user sees it instantly
+    const prevOrders = orders;
+    setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
 
     try {
-      const { error } = await supabase.rpc("kitchen_set_status", {
+      const rpcCall = supabase.rpc("kitchen_set_status", {
         p_order_id: orderId,
         p_new_status: newStatus,
       });
 
-      if (error) setErr(error.message);
-      else await load();
+      // ✅ timeout: prevents “grey forever” on mobile stalls
+      const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
+
+      if (error) {
+        setOrders(prevOrders); // revert
+        setErr(error.message);
+        return;
+      }
+
+      // refresh from server
+      await load();
+    } catch (e) {
+      setOrders(prevOrders); // revert
+      setErr(e?.message || "Something went wrong. Please try again.");
     } finally {
-      setBusy(false);
+      setBusyOrderId(null);
     }
   }
 
   async function logout() {
-    if (busy) return;
     setErr("");
-    setBusy(true);
-
     try {
-      const { error } = await supabase.auth.signOut();
+      // also timeout signout (mobile-safe)
+      const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
       if (error) setErr(error.message);
       nav("/login", { replace: true });
-    } finally {
-      setBusy(false);
+    } catch (e) {
+      setErr(e?.message || "Logout failed.");
     }
   }
 
@@ -189,12 +212,7 @@ export default function KitchenPage() {
             {soundOn ? "Sound: ON" : "Sound: OFF"}
           </button>
 
-          <button
-            type="button"
-            onClick={logout}
-            style={{ padding: "8px 12px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-            disabled={busy}
-          >
+          <button type="button" onClick={logout} style={{ padding: "8px 12px", borderRadius: 10, cursor: "pointer" }}>
             Logout
           </button>
         </div>
@@ -239,13 +257,9 @@ export default function KitchenPage() {
                       <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                         <div>
                           <b>{it.qty}×</b> {it.menu_items?.name}
-                          {it.item_notes ? (
-                            <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
-                          ) : null}
+                          {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
                         </div>
-                        <div style={{ color: "#666", fontSize: 12 }}>
-                          {money((it.unit_price_cents || 0) * (it.qty || 0))}
-                        </div>
+                        <div style={{ color: "#666", fontSize: 12 }}>{money((it.unit_price_cents || 0) * (it.qty || 0))}</div>
                       </div>
                     ))}
                   </div>
@@ -254,44 +268,64 @@ export default function KitchenPage() {
                     {st === "queued" && (
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busyOrderId === o.id}
                         onClick={() => setStatus(o.id, "accepted")}
-                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          cursor: "pointer",
+                          opacity: busyOrderId === o.id ? 0.6 : 1,
+                        }}
                       >
-                        Accept
+                        {busyOrderId === o.id ? "Accepting…" : "Accept"}
                       </button>
                     )}
 
                     {st === "accepted" && (
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busyOrderId === o.id}
                         onClick={() => setStatus(o.id, "preparing")}
-                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          cursor: "pointer",
+                          opacity: busyOrderId === o.id ? 0.6 : 1,
+                        }}
                       >
-                        Start Prep
+                        {busyOrderId === o.id ? "Updating…" : "Start Prep"}
                       </button>
                     )}
 
                     {st === "preparing" && (
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busyOrderId === o.id}
                         onClick={() => setStatus(o.id, "ready")}
-                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          cursor: "pointer",
+                          opacity: busyOrderId === o.id ? 0.6 : 1,
+                        }}
                       >
-                        Ready
+                        {busyOrderId === o.id ? "Updating…" : "Ready"}
                       </button>
                     )}
 
                     {st === "ready" && (
                       <button
                         type="button"
-                        disabled={busy}
+                        disabled={busyOrderId === o.id}
                         onClick={() => setStatus(o.id, "completed")}
-                        style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 10,
+                          cursor: "pointer",
+                          opacity: busyOrderId === o.id ? 0.6 : 1,
+                        }}
                       >
-                        Complete
+                        {busyOrderId === o.id ? "Completing…" : "Complete"}
                       </button>
                     )}
                   </div>
