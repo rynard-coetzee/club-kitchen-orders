@@ -21,7 +21,9 @@ export default function KitchenPage() {
   const [session, setSession] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
-  const [busyOrderId, setBusyOrderId] = useState(null); // ✅ per-order busy (better UX)
+  const [busyOrderId, setBusyOrderId] = useState(null);
+
+  const columns = ["queued", "accepted", "preparing", "ready"];
 
   // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("kitchen_sound") === "1");
@@ -101,6 +103,7 @@ export default function KitchenPage() {
         }
       }
 
+      // Cleanup: remove ids that are no longer queued
       for (const id of Array.from(seen)) {
         const stillQueued = nextOrders.some((o) => o.id === id && o.status === "queued");
         if (!stillQueued) seen.delete(id);
@@ -128,13 +131,13 @@ export default function KitchenPage() {
     return map;
   }, [orders]);
 
-  // ✅ Optimistic move + timeout protected RPC
   async function setStatus(orderId, newStatus) {
     if (busyOrderId) return;
+
     setErr("");
     setBusyOrderId(orderId);
 
-    // optimistic update so user sees it instantly
+    // optimistic update
     const prevOrders = orders;
     setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
 
@@ -144,19 +147,17 @@ export default function KitchenPage() {
         p_new_status: newStatus,
       });
 
-      // ✅ timeout: prevents “grey forever” on mobile stalls
       const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
 
       if (error) {
-        setOrders(prevOrders); // revert
+        setOrders(prevOrders);
         setErr(error.message);
         return;
       }
 
-      // refresh from server
       await load();
     } catch (e) {
-      setOrders(prevOrders); // revert
+      setOrders(prevOrders);
       setErr(e?.message || "Something went wrong. Please try again.");
     } finally {
       setBusyOrderId(null);
@@ -166,7 +167,6 @@ export default function KitchenPage() {
   async function logout() {
     setErr("");
     try {
-      // also timeout signout (mobile-safe)
       const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
       if (error) setErr(error.message);
       nav("/login", { replace: true });
@@ -174,8 +174,6 @@ export default function KitchenPage() {
       setErr(e?.message || "Logout failed.");
     }
   }
-
-  const columns = ["queued", "accepted", "preparing", "ready"];
 
   return (
     <div style={{ fontFamily: "Arial", padding: 16 }}>
@@ -191,6 +189,22 @@ export default function KitchenPage() {
         <h1 style={{ margin: 0 }}>Kitchen Queue</h1>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {/* ✅ Chef can place orders without a second tab */}
+          <button
+            type="button"
+            onClick={() => nav("/order")}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              background: "white",
+              fontWeight: 900,
+              cursor: "pointer",
+            }}
+          >
+            + New Order
+          </button>
+
           <button
             type="button"
             onClick={() => {
@@ -256,7 +270,7 @@ export default function KitchenPage() {
                     {(o.order_items || []).map((it) => (
                       <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                         <div>
-                          <b>{it.qty}×</b> {it.menu_items?.name}
+                          <b>{it.qty}×</b> {it.name}
                           {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
                         </div>
                         <div style={{ color: "#666", fontSize: 12 }}>{money((it.unit_price_cents || 0) * (it.qty || 0))}</div>

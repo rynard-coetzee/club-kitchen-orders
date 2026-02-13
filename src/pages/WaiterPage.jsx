@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
+const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready"];
 const COLUMNS = ["queued", "accepted", "preparing", "ready"];
 
 function minutesAgo(dateStr) {
@@ -44,13 +45,14 @@ export default function WaiterPage() {
   const [session, setSession] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
 
   const [compact, setCompact] = useState(false);
 
+  // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("waiter_sound") === "1");
-  const prevStatusMapRef = useRef(new Map());
+  const prevStatusMapRef = useRef(new Map()); // orderId -> lastStatus
 
+  // Default compact mode on small screens
   useEffect(() => {
     const decide = () => setCompact(window.innerWidth < 900);
     decide();
@@ -58,6 +60,7 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
+  // Require login + ROLE gate (waiter only)
   useEffect(() => {
     let alive = true;
 
@@ -81,6 +84,7 @@ export default function WaiterPage() {
       const r = String(role || "").trim().toLowerCase();
       if (r !== "waiter") {
         nav("/kitchen", { replace: true });
+        return;
       }
     }
 
@@ -100,7 +104,9 @@ export default function WaiterPage() {
       }
 
       const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") nav("/kitchen", { replace: true });
+      if (r !== "waiter") {
+        nav("/kitchen", { replace: true });
+      }
     });
 
     return () => {
@@ -111,14 +117,13 @@ export default function WaiterPage() {
 
   async function load() {
     setErr("");
+
     const { data, error } = await supabase.rpc("staff_list_active_orders");
     if (error) return setErr(error.message);
 
-    const nextOrders = (data || []).map((o) => ({
-      ...o,
-      order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
-    }));
+    const nextOrders = data || [];
 
+    // Sound: ding when order transitions to READY
     if (soundOn) {
       const prevMap = prevStatusMapRef.current;
 
@@ -130,11 +135,15 @@ export default function WaiterPage() {
           initSound();
           ding();
         }
+
         prevMap.set(o.id, now);
       }
     } else {
+      // keep map updated so turning sound on doesn't ding for everything
       const prevMap = prevStatusMapRef.current;
-      for (const o of nextOrders) prevMap.set(o.id, String(o.status || "").trim().toLowerCase());
+      for (const o of nextOrders) {
+        prevMap.set(o.id, String(o.status || "").trim().toLowerCase());
+      }
     }
 
     setOrders(nextOrders);
@@ -149,7 +158,10 @@ export default function WaiterPage() {
   }, [session, soundOn]);
 
   const ordersWithAge = useMemo(() => {
-    return (orders || []).map((o) => ({ ...o, mins: minutesAgo(o.created_at) }));
+    return (orders || []).map((o) => ({
+      ...o,
+      mins: minutesAgo(o.created_at),
+    }));
   }, [orders]);
 
   const byStatus = useMemo(() => {
@@ -172,16 +184,7 @@ export default function WaiterPage() {
   }, [ordersWithAge]);
 
   async function logout() {
-    if (busy) return;
-    setBusy(true);
-    setErr("");
-    try {
-      const { error } = await supabase.auth.signOut();
-      if (error) setErr(error.message);
-      nav("/login", { replace: true });
-    } finally {
-      setBusy(false);
-    }
+    await supabase.auth.signOut();
   }
 
   return (
@@ -193,6 +196,22 @@ export default function WaiterPage() {
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {/* Staff-only link to place an order */}
+          <button
+            type="button"
+            onClick={() => nav("/order")}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              background: "white",
+              fontWeight: 900,
+              cursor: "pointer",
+            }}
+          >
+            + New Order
+          </button>
+
           <button
             type="button"
             onClick={() => {
@@ -230,12 +249,7 @@ export default function WaiterPage() {
             {compact ? "Compact: ON" : "Compact: OFF"}
           </button>
 
-          <button
-            type="button"
-            onClick={logout}
-            disabled={busy}
-            style={{ padding: "8px 12px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-          >
+          <button type="button" onClick={logout} style={{ padding: "8px 12px", borderRadius: 10, cursor: "pointer" }}>
             Logout
           </button>
         </div>
@@ -247,6 +261,7 @@ export default function WaiterPage() {
         </div>
       )}
 
+      {/* Compact single-column list */}
       {compact ? (
         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
           {flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
@@ -254,7 +269,15 @@ export default function WaiterPage() {
           {flatSorted.map((o) => {
             const style = overdueCardStyle(o.mins);
             return (
-              <div key={o.id} style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 12 }}>
+              <div
+                key={o.id}
+                style={{
+                  border: `1px solid ${style.borderColor}`,
+                  background: style.background,
+                  borderRadius: 14,
+                  padding: 12,
+                }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                   <div>
                     <div style={{ fontWeight: 900, fontSize: 16 }}>
@@ -272,7 +295,7 @@ export default function WaiterPage() {
                 <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
                   {(o.order_items || []).map((it) => (
                     <div key={it.id} style={{ fontSize: 13 }}>
-                      <b>{it.qty}×</b> {it.menu_items?.name}
+                      <b>{it.qty}×</b> {it.name}
                       {it.item_notes ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
                     </div>
                   ))}
@@ -282,9 +305,19 @@ export default function WaiterPage() {
           })}
         </div>
       ) : (
+        /* Desktop 4-column board */
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 16 }}>
           {COLUMNS.map((st) => (
-            <div key={st} style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fafafa", minHeight: 260 }}>
+            <div
+              key={st}
+              style={{
+                border: "1px solid #eee",
+                borderRadius: 14,
+                padding: 12,
+                background: "#fafafa",
+                minHeight: 260,
+              }}
+            >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <h2 style={{ margin: 0, textTransform: "capitalize" }}>{st}</h2>
                 <div style={{ color: "#666", fontSize: 12 }}>{(byStatus.get(st) || []).length}</div>
@@ -296,7 +329,15 @@ export default function WaiterPage() {
                 {(byStatus.get(st) || []).map((o) => {
                   const style = overdueCardStyle(o.mins);
                   return (
-                    <div key={o.id} style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 10 }}>
+                    <div
+                      key={o.id}
+                      style={{
+                        border: `1px solid ${style.borderColor}`,
+                        background: style.background,
+                        borderRadius: 14,
+                        padding: 10,
+                      }}
+                    >
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                         <div>
                           <div style={{ fontWeight: 900 }}>
@@ -310,7 +351,7 @@ export default function WaiterPage() {
                       <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
                         {(o.order_items || []).map((it) => (
                           <div key={it.id} style={{ fontSize: 13 }}>
-                            <b>{it.qty}×</b> {it.menu_items?.name}
+                            <b>{it.qty}×</b> {it.name}
                             {it.item_notes ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
                           </div>
                         ))}
