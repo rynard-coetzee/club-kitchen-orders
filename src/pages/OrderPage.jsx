@@ -1,6 +1,7 @@
 // src/pages/OrderPage.jsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
+import { ding, initSound } from "../lib/sound";
 
 function money(cents) {
   return `R${(cents / 100).toFixed(2)}`;
@@ -57,22 +58,20 @@ function readyBannerStyle() {
 
 export default function OrderPage() {
   const [menu, setMenu] = useState([]);
-  const [cart, setCart] = useState([]); // [{menu_item_id, name, price_cents, qty, item_notes}]
+  const [cart, setCart] = useState([]);
   const [name, setName] = useState("");
-  const [orderType, setOrderType] = useState("dine_in"); // dine_in | collection
+  const [orderType, setOrderType] = useState("dine_in");
 
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [isPlacing, setIsPlacing] = useState(false);
   const [isMenuLoading, setIsMenuLoading] = useState(false);
 
-  // status tracking (saved per device)
-  const [activeOrder, setActiveOrder] = useState(null); // {order_id, guest_order_token, order_number}
+  const [activeOrder, setActiveOrder] = useState(null);
   const [orderData, setOrderData] = useState(null);
 
-  // UI helpers
   const [search, setSearch] = useState("");
-  const [expandedCats, setExpandedCats] = useState({}); // {cat: boolean}
+  const [expandedCats, setExpandedCats] = useState({});
 
   // Mobile layout helper
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 900);
@@ -81,6 +80,10 @@ export default function OrderPage() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // Patron sound toggle (saved)
+  const [soundOn, setSoundOn] = useState(() => localStorage.getItem("patron_sound") === "1");
+  const lastReadyOrderIdRef = useRef(null); // avoid dinging repeatedly while READY
 
   const grouped = useMemo(() => groupByCategory(menu), [menu]);
 
@@ -119,26 +122,21 @@ export default function OrderPage() {
     setMenu(data || []);
   }
 
-  // Load menu
   useEffect(() => {
     loadMenu();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load last order from localStorage (so patron can refresh and still track it)
   useEffect(() => {
     const raw = localStorage.getItem("club_last_order");
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
         if (parsed?.order_id && parsed?.guest_order_token) setActiveOrder(parsed);
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
   }, []);
 
-  // Poll order status
   useEffect(() => {
     if (!activeOrder?.order_id || !activeOrder?.guest_order_token) return;
 
@@ -166,21 +164,39 @@ export default function OrderPage() {
 
   const status = orderData?.order?.status || null;
   const orderNumber = orderData?.order?.order_number ?? activeOrder?.order_number ?? null;
+  const orderId = orderData?.order?.id ?? activeOrder?.order_id ?? null;
 
   const isReady = String(status || "").toLowerCase() === "ready";
   const hasTrackedOrder = Boolean(orderData?.order);
 
-  // Vibrate strongly on READY (mobile-friendly)
+  // Vibrate + SOUND on READY (once per order)
   useEffect(() => {
+    if (!orderId) return;
     if (!status) return;
-    if (String(status).toLowerCase() !== "ready") return;
 
-    try {
-      if (navigator.vibrate) navigator.vibrate([200, 80, 200, 80, 250, 80, 300]);
-    } catch {
-      // ignore
+    const s = String(status).toLowerCase();
+
+    if (s === "ready") {
+      // vibrate
+      try {
+        if (navigator.vibrate) navigator.vibrate([200, 80, 200, 80, 250, 80, 300]);
+      } catch {}
+
+      // sound (only once per order)
+      if (soundOn && lastReadyOrderIdRef.current !== orderId) {
+        try {
+          initSound(); // ensure audio context enabled if previously clicked something
+          ding();
+        } catch {}
+        lastReadyOrderIdRef.current = orderId;
+      }
     }
-  }, [status]);
+
+    // reset guard when leaving READY (so it can ding again if needed later)
+    if (s !== "ready" && lastReadyOrderIdRef.current === orderId) {
+      lastReadyOrderIdRef.current = null;
+    }
+  }, [status, soundOn, orderId]);
 
   function addToCart(item) {
     setCart((prev) => {
@@ -192,13 +208,7 @@ export default function OrderPage() {
       }
       return [
         ...prev,
-        {
-          menu_item_id: item.id,
-          name: item.name,
-          price_cents: item.price_cents,
-          qty: 1,
-          item_notes: "",
-        },
+        { menu_item_id: item.id, name: item.name, price_cents: item.price_cents, qty: 1, item_notes: "" },
       ];
     });
   }
@@ -253,14 +263,12 @@ export default function OrderPage() {
 
     const row = Array.isArray(data) ? data[0] : data;
 
-    const saved = {
-      order_id: row.order_id,
-      guest_order_token: row.guest_order_token,
-      order_number: row.order_number,
-    };
-
+    const saved = { order_id: row.order_id, guest_order_token: row.guest_order_token, order_number: row.order_number };
     localStorage.setItem("club_last_order", JSON.stringify(saved));
     setActiveOrder(saved);
+
+    // reset ready guard for new order
+    lastReadyOrderIdRef.current = null;
 
     setCart([]);
     setMsg(`Order sent! Your order number is #${row.order_number}`);
@@ -275,9 +283,8 @@ export default function OrderPage() {
     setMsg("");
     setErr("");
     setSearch("");
+    lastReadyOrderIdRef.current = null;
     window.scrollTo({ top: 0, behavior: "smooth" });
-
-    // Mobile-safe: reload menu in case state got dropped / refreshed
     await loadMenu();
   }
 
@@ -292,8 +299,6 @@ export default function OrderPage() {
     : orderType === "collection"
     ? "Collection"
     : "Dine-in";
-
-  // --- Blocks (so we can reorder on mobile easily) ---
 
   const MenuBlock = (
     <div>
@@ -371,13 +376,7 @@ export default function OrderPage() {
           {filteredGrouped.map(([cat, list]) => {
             const expanded = expandedCats[cat] ?? true;
             return (
-              <div
-                key={cat}
-                style={{
-                  borderTop: "1px solid #f1f1f1",
-                  paddingTop: 10,
-                }}
-              >
+              <div key={cat} style={{ borderTop: "1px solid #f1f1f1", paddingTop: 10 }}>
                 <button
                   type="button"
                   onClick={() => toggleCategory(cat)}
@@ -427,9 +426,7 @@ export default function OrderPage() {
                         >
                           <div>
                             <div style={{ fontWeight: 900 }}>{it.name}</div>
-                            {it.description ? (
-                              <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div>
-                            ) : null}
+                            {it.description ? <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div> : null}
                           </div>
 
                           <div style={{ fontWeight: 900 }}>{money(it.price_cents)}</div>
@@ -490,8 +487,34 @@ export default function OrderPage() {
       >
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
           <h2 style={{ margin: 0 }}>Cart</h2>
-          <div style={{ color: "#666", fontSize: 13 }}>
-            {cart.length} item{cart.length === 1 ? "" : "s"}
+
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => {
+                // user gesture enables audio
+                initSound();
+                const next = !soundOn;
+                setSoundOn(next);
+                localStorage.setItem("patron_sound", next ? "1" : "0");
+              }}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: soundOn ? "#111" : "white",
+                color: soundOn ? "white" : "#111",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+              title="Enable sound alert when READY"
+            >
+              {soundOn ? "Sound: ON" : "Sound: OFF"}
+            </button>
+
+            <div style={{ color: "#666", fontSize: 13 }}>
+              {cart.length} item{cart.length === 1 ? "" : "s"}
+            </div>
           </div>
         </div>
 
@@ -514,14 +537,7 @@ export default function OrderPage() {
                   <div style={{ fontWeight: 900 }}>{money(x.price_cents * x.qty)}</div>
                 </div>
 
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginTop: 8,
-                  }}
-                >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <button
                       type="button"
@@ -671,9 +687,7 @@ export default function OrderPage() {
           <div
             style={{
               ...statusPillStyle(status),
-              ...(isReady
-                ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" }
-                : {}),
+              ...(isReady ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" } : {}),
             }}
           >
             {status ? `STATUS: ${normalizeStatus(status)}` : "STATUS: —"}
@@ -701,52 +715,20 @@ export default function OrderPage() {
 
       {/* Messages */}
       {err && (
-        <div
-          style={{
-            background: "#ffe5e5",
-            padding: 12,
-            borderRadius: 12,
-            marginTop: 12,
-            border: "1px solid #fecaca",
-          }}
-        >
+        <div style={{ background: "#ffe5e5", padding: 12, borderRadius: 12, marginTop: 12, border: "1px solid #fecaca" }}>
           <b>Error:</b> {err}
         </div>
       )}
       {msg && (
-        <div
-          style={{
-            background: "#e7f6e7",
-            padding: 12,
-            borderRadius: 12,
-            marginTop: 12,
-            border: "1px solid #bbf7d0",
-          }}
-        >
+        <div style={{ background: "#e7f6e7", padding: 12, borderRadius: 12, marginTop: 12, border: "1px solid #bbf7d0" }}>
           {msg}
         </div>
       )}
 
       {/* Current tracked order status */}
       {hasTrackedOrder && (
-        <div
-          style={{
-            marginTop: 14,
-            border: "1px solid #eee",
-            borderRadius: 16,
-            padding: 14,
-            background: isReady ? "#ecfdf5" : "white",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
+        <div style={{ marginTop: 14, border: "1px solid #eee", borderRadius: 16, padding: 14, background: isReady ? "#ecfdf5" : "white" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
             <div>
               <div style={{ fontWeight: 900, fontSize: 16 }}>
                 Order #{orderData.order.order_number} • {orderTypeLabel}
@@ -760,17 +742,11 @@ export default function OrderPage() {
 
               {isReady && (
                 <div style={readyBannerStyle()}>
-                  <div style={{ fontSize: 12, letterSpacing: 1.2, fontWeight: 900, opacity: 0.95 }}>
-                    READY FOR COLLECTION
-                  </div>
+                  <div style={{ fontSize: 12, letterSpacing: 1.2, fontWeight: 900, opacity: 0.95 }}>READY FOR COLLECTION</div>
 
-                  <div style={{ marginTop: 8, fontSize: 34, fontWeight: 950, lineHeight: 1 }}>
-                    #{orderData.order.order_number}
-                  </div>
+                  <div style={{ marginTop: 8, fontSize: 34, fontWeight: 950, lineHeight: 1 }}>#{orderData.order.order_number}</div>
 
-                  <div style={{ marginTop: 8, fontSize: 18, fontWeight: 900 }}>
-                    Please collect at the kitchen now ✅
-                  </div>
+                  <div style={{ marginTop: 8, fontSize: 18, fontWeight: 900 }}>Please collect at the kitchen now ✅</div>
 
                   <div style={{ marginTop: 8, fontSize: 13, opacity: 0.95 }}>
                     Name: <b>{orderData.order.customer_name}</b>
@@ -798,14 +774,7 @@ export default function OrderPage() {
       )}
 
       {/* Inputs + Cart */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
-          gap: 16,
-          marginTop: 16,
-        }}
-      >
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr", gap: 16, marginTop: 16 }}>
         {isMobile ? (
           <>
             {CartBlock}
@@ -821,15 +790,7 @@ export default function OrderPage() {
 
       {/* Show items for tracked order */}
       {orderData?.items?.length ? (
-        <div
-          style={{
-            marginTop: 16,
-            border: "1px solid #eee",
-            borderRadius: 16,
-            padding: 14,
-            background: "white",
-          }}
-        >
+        <div style={{ marginTop: 16, border: "1px solid #eee", borderRadius: 16, padding: 14, background: "white" }}>
           <h3 style={{ marginTop: 0 }}>Your items</h3>
           <div style={{ display: "grid", gap: 8 }}>
             {orderData.items.map((it) => (
@@ -846,7 +807,7 @@ export default function OrderPage() {
       ) : null}
 
       <div style={{ marginTop: 16, color: "#777", fontSize: 12 }}>
-        Tip: If you refresh the page, your last order stays visible on this device.
+        Tip: Turn Sound ON (in the cart) to hear a ding when your order becomes READY.
       </div>
     </div>
   );
