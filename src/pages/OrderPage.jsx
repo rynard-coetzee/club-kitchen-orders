@@ -64,6 +64,7 @@ export default function OrderPage() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [isPlacing, setIsPlacing] = useState(false);
+  const [isMenuLoading, setIsMenuLoading] = useState(false);
 
   // status tracking (saved per device)
   const [activeOrder, setActiveOrder] = useState(null); // {order_id, guest_order_token, order_number}
@@ -72,6 +73,14 @@ export default function OrderPage() {
   // UI helpers
   const [search, setSearch] = useState("");
   const [expandedCats, setExpandedCats] = useState({}); // {cat: boolean}
+
+  // Mobile layout helper
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 900);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 900);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const grouped = useMemo(() => groupByCategory(menu), [menu]);
 
@@ -90,26 +99,30 @@ export default function OrderPage() {
       .filter(([, list]) => list.length > 0);
   }, [grouped, search]);
 
-  const cartTotal = useMemo(
-    () => cart.reduce((sum, x) => sum + x.price_cents * x.qty, 0),
-    [cart]
-  );
+  const cartTotal = useMemo(() => cart.reduce((sum, x) => sum + x.price_cents * x.qty, 0), [cart]);
+
+  async function loadMenu() {
+    setIsMenuLoading(true);
+    setErr("");
+
+    const { data, error } = await supabase
+      .from("menu_items")
+      .select("id,name,description,price_cents,category,sort_order,is_available")
+      .eq("is_available", true)
+      .order("category", { ascending: true })
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true });
+
+    setIsMenuLoading(false);
+
+    if (error) return setErr(error.message);
+    setMenu(data || []);
+  }
 
   // Load menu
   useEffect(() => {
-    (async () => {
-      setErr("");
-      const { data, error } = await supabase
-        .from("menu_items")
-        .select("id,name,description,price_cents,category,sort_order,is_available")
-        .eq("is_available", true)
-        .order("category", { ascending: true })
-        .order("sort_order", { ascending: true })
-        .order("name", { ascending: true });
-
-      if (error) return setErr(error.message);
-      setMenu(data || []);
-    })();
+    loadMenu();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Load last order from localStorage (so patron can refresh and still track it)
@@ -152,8 +165,7 @@ export default function OrderPage() {
   }, [activeOrder]);
 
   const status = orderData?.order?.status || null;
-  const orderNumber =
-    orderData?.order?.order_number ?? activeOrder?.order_number ?? null;
+  const orderNumber = orderData?.order?.order_number ?? activeOrder?.order_number ?? null;
 
   const isReady = String(status || "").toLowerCase() === "ready";
   const hasTrackedOrder = Boolean(orderData?.order);
@@ -172,9 +184,7 @@ export default function OrderPage() {
 
   function addToCart(item) {
     setCart((prev) => {
-      const idx = prev.findIndex(
-        (x) => x.menu_item_id === item.id && (x.item_notes || "") === ""
-      );
+      const idx = prev.findIndex((x) => x.menu_item_id === item.id && (x.item_notes || "") === "");
       if (idx >= 0) {
         const copy = [...prev];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
@@ -257,14 +267,18 @@ export default function OrderPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function startNewOrder() {
+  async function startNewOrder() {
     localStorage.removeItem("club_last_order");
     setActiveOrder(null);
     setOrderData(null);
     setCart([]);
     setMsg("");
     setErr("");
+    setSearch("");
     window.scrollTo({ top: 0, behavior: "smooth" });
+
+    // Mobile-safe: reload menu in case state got dropped / refreshed
+    await loadMenu();
   }
 
   function toggleCategory(cat) {
@@ -279,22 +293,350 @@ export default function OrderPage() {
     ? "Collection"
     : "Dine-in";
 
+  // --- Blocks (so we can reorder on mobile easily) ---
+
+  const MenuBlock = (
+    <div>
+      <div
+        style={{
+          border: "1px solid #eee",
+          borderRadius: 16,
+          padding: 14,
+          background: "white",
+          boxShadow: "0 10px 25px rgba(0,0,0,0.04)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "space-between",
+            gap: 10,
+            alignItems: "center",
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0 }}>Menu</h2>
+            <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>Tap an item to add it to your cart.</div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <select
+              value={orderType}
+              onChange={(e) => setOrderType(e.target.value)}
+              style={{
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                fontWeight: 700,
+                background: "white",
+              }}
+            >
+              <option value="dine_in">Dine-in</option>
+              <option value="collection">Collection</option>
+            </select>
+
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Your name (required)"
+              style={{
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                width: 240,
+              }}
+            />
+
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search menu…"
+              style={{
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                width: 200,
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          {isMenuLoading ? <div style={{ color: "#666" }}>Loading menu…</div> : null}
+          {!isMenuLoading && !err && menu.length === 0 ? <div style={{ color: "#777" }}>Menu is empty.</div> : null}
+        </div>
+
+        <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
+          {filteredGrouped.map(([cat, list]) => {
+            const expanded = expandedCats[cat] ?? true;
+            return (
+              <div
+                key={cat}
+                style={{
+                  borderTop: "1px solid #f1f1f1",
+                  paddingTop: 10,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleCategory(cat)}
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "baseline",
+                    gap: 10,
+                  }}
+                >
+                  <h3 style={{ margin: 0 }}>{cat}</h3>
+                  <span style={{ color: "#666", fontSize: 12 }}>
+                    {expanded ? "Hide" : "Show"} • {list.length}
+                  </span>
+                </button>
+
+                {expanded && (
+                  <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+                    {list.map((it) => (
+                      <button
+                        type="button"
+                        key={it.id}
+                        onClick={() => addToCart(it)}
+                        style={{
+                          textAlign: "left",
+                          padding: 12,
+                          borderRadius: 14,
+                          border: "1px solid #eee",
+                          background: "white",
+                          cursor: "pointer",
+                          boxShadow: "0 6px 14px rgba(0,0,0,0.04)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 12,
+                            alignItems: "flex-start",
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 900 }}>{it.name}</div>
+                            {it.description ? (
+                              <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div>
+                            ) : null}
+                          </div>
+
+                          <div style={{ fontWeight: 900 }}>{money(it.price_cents)}</div>
+                        </div>
+
+                        <div
+                          style={{
+                            marginTop: 8,
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 10,
+                          }}
+                        >
+                          <div style={{ color: "#2563eb", fontSize: 12, fontWeight: 800 }}>Tap to add</div>
+                          <div
+                            style={{
+                              padding: "5px 10px",
+                              borderRadius: 999,
+                              background: "#eff6ff",
+                              border: "1px solid #dbeafe",
+                              fontSize: 12,
+                              fontWeight: 900,
+                              color: "#1d4ed8",
+                            }}
+                          >
+                            + Add
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {!err && !isMenuLoading && filteredGrouped.length === 0 && (
+            <div style={{ color: "#777" }}>No menu items match your search.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const CartBlock = (
+    <div>
+      <div
+        style={{
+          border: "1px solid #eee",
+          borderRadius: 16,
+          padding: 14,
+          position: isMobile ? "static" : "sticky",
+          top: isMobile ? "auto" : 12,
+          background: "white",
+          boxShadow: "0 10px 25px rgba(0,0,0,0.04)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+          <h2 style={{ margin: 0 }}>Cart</h2>
+          <div style={{ color: "#666", fontSize: 13 }}>
+            {cart.length} item{cart.length === 1 ? "" : "s"}
+          </div>
+        </div>
+
+        {cart.length === 0 ? (
+          <div style={{ marginTop: 10, color: "#666" }}>Tap menu items to add them.</div>
+        ) : (
+          <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+            {cart.map((x, i) => (
+              <div
+                key={`${x.menu_item_id}-${i}`}
+                style={{
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 14,
+                  padding: 10,
+                  background: "#fafafa",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <div style={{ fontWeight: 900 }}>{x.name}</div>
+                  <div style={{ fontWeight: 900 }}>{money(x.price_cents * x.qty)}</div>
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginTop: 8,
+                  }}
+                >
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      onClick={() => decLine(i)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #ddd",
+                        background: "white",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      aria-label="decrease"
+                    >
+                      −
+                    </button>
+                    <b>{x.qty}</b>
+                    <button
+                      type="button"
+                      onClick={() => incLine(i)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #ddd",
+                        background: "white",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      aria-label="increase"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div style={{ color: "#666", fontSize: 12 }}>{money(x.price_cents)} each</div>
+                </div>
+
+                <input
+                  value={x.item_notes}
+                  onChange={(e) => setNote(i, e.target.value)}
+                  placeholder="Notes (optional) e.g. no onion"
+                  style={{
+                    marginTop: 8,
+                    width: "100%",
+                    padding: 10,
+                    borderRadius: 12,
+                    border: "1px solid #ddd",
+                    background: "white",
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ borderTop: "1px solid #eee", marginTop: 14, paddingTop: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <b>Total</b>
+            <b>{money(cartTotal)}</b>
+          </div>
+
+          <button
+            type="button"
+            onClick={placeOrder}
+            disabled={cart.length === 0 || isPlacing}
+            style={{
+              width: "100%",
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 14,
+              border: "none",
+              background: cart.length === 0 || isPlacing ? "#cbd5e1" : "#2563eb",
+              color: "white",
+              fontWeight: 900,
+              cursor: cart.length === 0 || isPlacing ? "not-allowed" : "pointer",
+              boxShadow: "0 12px 22px rgba(37, 99, 235, 0.22)",
+            }}
+          >
+            {isPlacing ? "Placing…" : "Place Order"}
+          </button>
+
+          <div style={{ marginTop: 10, color: "#666", fontSize: 12 }}>
+            You’ll receive an order number and collect at the kitchen when <b>READY</b>.
+          </div>
+
+          {activeOrder?.order_id && (
+            <button
+              type="button"
+              onClick={startNewOrder}
+              style={{
+                width: "100%",
+                marginTop: 10,
+                padding: 10,
+                borderRadius: 14,
+                border: "1px solid #ddd",
+                background: "white",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Start a new order
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div
-      style={{
-        fontFamily: "Arial",
-        padding: 16,
-        maxWidth: 980,
-        margin: "0 auto",
-      }}
-    >
+    <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto" }}>
       {/* HERO HEADER */}
       <div
         style={{
           borderRadius: 18,
           padding: 16,
-          background:
-            "linear-gradient(135deg, #0b1220 0%, #111827 50%, #0b1220 100%)",
+          background: "linear-gradient(135deg, #0b1220 0%, #111827 50%, #0b1220 100%)",
           color: "white",
           display: "flex",
           justifyContent: "space-between",
@@ -305,7 +647,6 @@ export default function OrderPage() {
         }}
       >
         <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-          {/* Put logo in: public/clubhouse-logo.png */}
           <img
             src="/clubhouse-logo.png"
             alt="Clubhouse Kitchen"
@@ -319,32 +660,19 @@ export default function OrderPage() {
             }}
           />
           <div>
-            <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: 0.2 }}>
-              Clubhouse Kitchen
-            </div>
+            <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: 0.2 }}>Clubhouse Kitchen</div>
             <div style={{ opacity: 0.85, marginTop: 3 }}>
-              Order, get a number, collect at the kitchen when{" "}
-              <b>READY</b>.
+              Order, get a number, collect at the kitchen when <b>READY</b>.
             </div>
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <div
             style={{
               ...statusPillStyle(status),
               ...(isReady
-                ? {
-                    background: "rgba(34,197,94,0.35)",
-                    borderColor: "rgba(34,197,94,0.55)",
-                  }
+                ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" }
                 : {}),
             }}
           >
@@ -430,28 +758,13 @@ export default function OrderPage() {
                 Name: <b>{orderData.order.customer_name}</b>
               </div>
 
-              {/* BIG READY BANNER */}
               {isReady && (
                 <div style={readyBannerStyle()}>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      letterSpacing: 1.2,
-                      fontWeight: 900,
-                      opacity: 0.95,
-                    }}
-                  >
+                  <div style={{ fontSize: 12, letterSpacing: 1.2, fontWeight: 900, opacity: 0.95 }}>
                     READY FOR COLLECTION
                   </div>
 
-                  <div
-                    style={{
-                      marginTop: 8,
-                      fontSize: 34,
-                      fontWeight: 950,
-                      lineHeight: 1,
-                    }}
-                  >
+                  <div style={{ marginTop: 8, fontSize: 34, fontWeight: 950, lineHeight: 1 }}>
                     #{orderData.order.order_number}
                   </div>
 
@@ -467,6 +780,7 @@ export default function OrderPage() {
             </div>
 
             <button
+              type="button"
               onClick={startNewOrder}
               style={{
                 padding: "10px 12px",
@@ -487,375 +801,22 @@ export default function OrderPage() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1.2fr 0.8fr",
+          gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
           gap: 16,
           marginTop: 16,
         }}
       >
-        {/* MENU */}
-        <div>
-          <div
-            style={{
-              border: "1px solid #eee",
-              borderRadius: 16,
-              padding: 14,
-              background: "white",
-              boxShadow: "0 10px 25px rgba(0,0,0,0.04)",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                justifyContent: "space-between",
-                gap: 10,
-                alignItems: "center",
-              }}
-            >
-              <div>
-                <h2 style={{ margin: 0 }}>Menu</h2>
-                <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>
-                  Tap an item to add it to your cart.
-                </div>
-              </div>
-
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <select
-                  value={orderType}
-                  onChange={(e) => setOrderType(e.target.value)}
-                  style={{
-                    padding: 10,
-                    borderRadius: 12,
-                    border: "1px solid #ddd",
-                    fontWeight: 700,
-                    background: "white",
-                  }}
-                >
-                  <option value="dine_in">Dine-in</option>
-                  <option value="collection">Collection</option>
-                </select>
-
-                <input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Your name (required)"
-                  style={{
-                    padding: 10,
-                    borderRadius: 12,
-                    border: "1px solid #ddd",
-                    width: 240,
-                  }}
-                />
-
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search menu…"
-                  style={{
-                    padding: 10,
-                    borderRadius: 12,
-                    border: "1px solid #ddd",
-                    width: 200,
-                  }}
-                />
-              </div>
-            </div>
-
-            <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
-              {filteredGrouped.map(([cat, list]) => {
-                const expanded = expandedCats[cat] ?? true; // default open
-                return (
-                  <div
-                    key={cat}
-                    style={{
-                      borderTop: "1px solid #f1f1f1",
-                      paddingTop: 10,
-                    }}
-                  >
-                    <button
-                      onClick={() => toggleCategory(cat)}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        background: "transparent",
-                        border: "none",
-                        padding: 0,
-                        cursor: "pointer",
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "baseline",
-                        gap: 10,
-                      }}
-                    >
-                      <h3 style={{ margin: 0 }}>{cat}</h3>
-                      <span style={{ color: "#666", fontSize: 12 }}>
-                        {expanded ? "Hide" : "Show"} • {list.length}
-                      </span>
-                    </button>
-
-                    {expanded && (
-                      <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
-                        {list.map((it) => (
-                          <button
-                            key={it.id}
-                            onClick={() => addToCart(it)}
-                            style={{
-                              textAlign: "left",
-                              padding: 12,
-                              borderRadius: 14,
-                              border: "1px solid #eee",
-                              background: "white",
-                              cursor: "pointer",
-                              boxShadow: "0 6px 14px rgba(0,0,0,0.04)",
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                gap: 12,
-                                alignItems: "flex-start",
-                              }}
-                            >
-                              <div>
-                                <div style={{ fontWeight: 900 }}>{it.name}</div>
-                                {it.description ? (
-                                  <div style={{ color: "#666", fontSize: 13 }}>
-                                    {it.description}
-                                  </div>
-                                ) : null}
-                              </div>
-
-                              <div style={{ fontWeight: 900 }}>
-                                {money(it.price_cents)}
-                              </div>
-                            </div>
-
-                            <div
-                              style={{
-                                marginTop: 8,
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                                gap: 10,
-                              }}
-                            >
-                              <div
-                                style={{
-                                  color: "#2563eb",
-                                  fontSize: 12,
-                                  fontWeight: 800,
-                                }}
-                              >
-                                Tap to add
-                              </div>
-                              <div
-                                style={{
-                                  padding: "5px 10px",
-                                  borderRadius: 999,
-                                  background: "#eff6ff",
-                                  border: "1px solid #dbeafe",
-                                  fontSize: 12,
-                                  fontWeight: 900,
-                                  color: "#1d4ed8",
-                                }}
-                              >
-                                + Add
-                              </div>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              {!err && filteredGrouped.length === 0 && (
-                <div style={{ color: "#777" }}>
-                  No menu items match your search.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* CART */}
-        <div>
-          <div
-            style={{
-              border: "1px solid #eee",
-              borderRadius: 16,
-              padding: 14,
-              position: "sticky",
-              top: 12,
-              background: "white",
-              boxShadow: "0 10px 25px rgba(0,0,0,0.04)",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 10,
-                alignItems: "baseline",
-              }}
-            >
-              <h2 style={{ margin: 0 }}>Cart</h2>
-              <div style={{ color: "#666", fontSize: 13 }}>
-                {cart.length} item{cart.length === 1 ? "" : "s"}
-              </div>
-            </div>
-
-            {cart.length === 0 ? (
-              <div style={{ marginTop: 10, color: "#666" }}>
-                Tap menu items to add them.
-              </div>
-            ) : (
-              <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-                {cart.map((x, i) => (
-                  <div
-                    key={`${x.menu_item_id}-${i}`}
-                    style={{
-                      border: "1px solid #f0f0f0",
-                      borderRadius: 14,
-                      padding: 10,
-                      background: "#fafafa",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        gap: 10,
-                      }}
-                    >
-                      <div style={{ fontWeight: 900 }}>{x.name}</div>
-                      <div style={{ fontWeight: 900 }}>
-                        {money(x.price_cents * x.qty)}
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        marginTop: 8,
-                      }}
-                    >
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <button
-                          onClick={() => decLine(i)}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 12,
-                            border: "1px solid #ddd",
-                            background: "white",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
-                          aria-label="decrease"
-                        >
-                          −
-                        </button>
-                        <b>{x.qty}</b>
-                        <button
-                          onClick={() => incLine(i)}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 12,
-                            border: "1px solid #ddd",
-                            background: "white",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
-                          aria-label="increase"
-                        >
-                          +
-                        </button>
-                      </div>
-                      <div style={{ color: "#666", fontSize: 12 }}>
-                        {money(x.price_cents)} each
-                      </div>
-                    </div>
-
-                    <input
-                      value={x.item_notes}
-                      onChange={(e) => setNote(i, e.target.value)}
-                      placeholder="Notes (optional) e.g. no onion"
-                      style={{
-                        marginTop: 8,
-                        width: "100%",
-                        padding: 10,
-                        borderRadius: 12,
-                        border: "1px solid #ddd",
-                        background: "white",
-                      }}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div
-              style={{
-                borderTop: "1px solid #eee",
-                marginTop: 14,
-                paddingTop: 14,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <b>Total</b>
-                <b>{money(cartTotal)}</b>
-              </div>
-
-              <button
-                onClick={placeOrder}
-                disabled={cart.length === 0 || isPlacing}
-                style={{
-                  width: "100%",
-                  marginTop: 12,
-                  padding: 12,
-                  borderRadius: 14,
-                  border: "none",
-                  background:
-                    cart.length === 0 || isPlacing ? "#cbd5e1" : "#2563eb",
-                  color: "white",
-                  fontWeight: 900,
-                  cursor:
-                    cart.length === 0 || isPlacing ? "not-allowed" : "pointer",
-                  boxShadow: "0 12px 22px rgba(37, 99, 235, 0.22)",
-                }}
-              >
-                {isPlacing ? "Placing…" : "Place Order"}
-              </button>
-
-              <div style={{ marginTop: 10, color: "#666", fontSize: 12 }}>
-                You’ll receive an order number and collect at the kitchen when{" "}
-                <b>READY</b>.
-              </div>
-
-              {activeOrder?.order_id && (
-                <button
-                  onClick={startNewOrder}
-                  style={{
-                    width: "100%",
-                    marginTop: 10,
-                    padding: 10,
-                    borderRadius: 14,
-                    border: "1px solid #ddd",
-                    background: "white",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
-                >
-                  Start a new order
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        {isMobile ? (
+          <>
+            {CartBlock}
+            {MenuBlock}
+          </>
+        ) : (
+          <>
+            {MenuBlock}
+            {CartBlock}
+          </>
+        )}
       </div>
 
       {/* Show items for tracked order */}
@@ -872,25 +833,12 @@ export default function OrderPage() {
           <h3 style={{ marginTop: 0 }}>Your items</h3>
           <div style={{ display: "grid", gap: 8 }}>
             {orderData.items.map((it) => (
-              <div
-                key={it.id}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
+              <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                 <div>
                   <b>{it.qty}×</b> {it.name}
-                  {it.item_notes ? (
-                    <div style={{ color: "#666", fontSize: 12 }}>
-                      Note: {it.item_notes}
-                    </div>
-                  ) : null}
+                  {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
                 </div>
-                <div style={{ color: "#666" }}>
-                  {money(it.unit_price_cents * it.qty)}
-                </div>
+                <div style={{ color: "#666" }}>{money(it.unit_price_cents * it.qty)}</div>
               </div>
             ))}
           </div>
