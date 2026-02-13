@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
-const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready"];
 const COLUMNS = ["queued", "accepted", "preparing", "ready"];
 
 function minutesAgo(dateStr) {
@@ -42,7 +41,10 @@ function overdueCardStyle(mins) {
 
 export default function WaiterPage() {
   const nav = useNavigate();
-  const [session, setSession] = useState(null);
+
+  const [authReady, setAuthReady] = useState(false);
+  const [role, setRole] = useState(null); // "waiter" | "kitchen" | null
+
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
 
@@ -60,53 +62,49 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
-  // Require login + ROLE gate (waiter only)
+  // Auth gate + ROLE gate (waiter only) — robust across refresh
   useEffect(() => {
     let alive = true;
 
-    async function check() {
+    async function checkAuthAndRole() {
+      setErr("");
+
       const { data } = await supabase.auth.getSession();
-      const s = data.session || null;
+      const session = data.session;
+
       if (!alive) return;
 
-      setSession(s);
-      if (!s) {
-        nav("/login");
+      if (!session) {
+        setAuthReady(true);
+        setRole(null);
+        nav("/login", { replace: true });
         return;
       }
 
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
+      const { data: r, error: roleErr } = await supabase.rpc("get_my_role");
+      if (!alive) return;
+
       if (roleErr) {
-        nav("/login");
+        setAuthReady(true);
+        setRole(null);
+        setErr(roleErr.message);
+        nav("/login", { replace: true });
         return;
       }
 
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") {
+      const normalized = String(r || "").trim().toLowerCase();
+      setRole(normalized);
+      setAuthReady(true);
+
+      if (normalized !== "waiter") {
         nav("/kitchen", { replace: true });
-        return;
       }
     }
 
-    check();
+    checkAuthAndRole();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
-      setSession(s);
-      if (!s) {
-        nav("/login");
-        return;
-      }
-
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (roleErr) {
-        nav("/login");
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") {
-        nav("/kitchen", { replace: true });
-      }
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      checkAuthAndRole();
     });
 
     return () => {
@@ -118,10 +116,16 @@ export default function WaiterPage() {
   async function load() {
     setErr("");
 
-    const { data, error } = await supabase.rpc("staff_list_active_orders", {p_bust: Date.now(),});
+    const { data, error } = await supabase.rpc("staff_list_active_orders", {
+      p_bust: Date.now(),
+    });
     if (error) return setErr(error.message);
 
-    const nextOrders = data || [];
+    // normalize order_items (RPC returns json sometimes)
+    const nextOrders = (data || []).map((o) => ({
+      ...o,
+      order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
+    }));
 
     // Sound: ding when order transitions to READY
     if (soundOn) {
@@ -149,13 +153,16 @@ export default function WaiterPage() {
     setOrders(nextOrders);
   }
 
+  // Poll only when role is confirmed waiter
   useEffect(() => {
-    if (!session) return;
+    if (!authReady) return;
+    if (role !== "waiter") return;
+
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, soundOn]);
+  }, [authReady, role, soundOn]);
 
   const ordersWithAge = useMemo(() => {
     return (orders || []).map((o) => ({
@@ -183,8 +190,16 @@ export default function WaiterPage() {
     });
   }, [ordersWithAge]);
 
+  // Reliable logout (hard redirect)
   async function logout() {
-    await supabase.auth.signOut();
+    setErr("");
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      console.warn("signOut failed:", e);
+    } finally {
+      window.location.href = "/login";
+    }
   }
 
   return (
@@ -196,7 +211,6 @@ export default function WaiterPage() {
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          {/* Staff-only link to place an order */}
           <button
             type="button"
             onClick={() => nav("/order")}
@@ -212,7 +226,6 @@ export default function WaiterPage() {
             + New Order
           </button>
 
-          {/* ✅ Reports */}
           <button
             type="button"
             onClick={() => nav("/reports")}
@@ -277,8 +290,11 @@ export default function WaiterPage() {
         </div>
       )}
 
-      {/* Compact single-column list */}
-      {compact ? (
+      {!authReady ? (
+        <div style={{ marginTop: 14, color: "#666" }}>Loading…</div>
+      ) : role !== "waiter" ? (
+        <div style={{ marginTop: 14, color: "#666" }}>Redirecting…</div>
+      ) : compact ? (
         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
           {flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
 
@@ -321,7 +337,6 @@ export default function WaiterPage() {
           })}
         </div>
       ) : (
-        /* Desktop 4-column board */
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 16 }}>
           {COLUMNS.map((st) => (
             <div
