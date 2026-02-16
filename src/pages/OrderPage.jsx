@@ -57,11 +57,15 @@ function readyBannerStyle() {
   };
 }
 
+const EXTRAS_CATEGORY = "Extras";
+
 export default function OrderPage() {
   const nav = useNavigate();
 
   const [menu, setMenu] = useState([]);
-  const [cart, setCart] = useState([]); // [{menu_item_id, name, price_cents, qty, item_notes}]
+  // cart line:
+  // { menu_item_id, name, price_cents, qty, item_notes, extras: [{menu_item_id,name,price_cents,qty}] }
+  const [cart, setCart] = useState([]);
   const [name, setName] = useState("");
   const [orderType, setOrderType] = useState("dine_in"); // dine_in | collection
 
@@ -93,6 +97,11 @@ export default function OrderPage() {
   // Staff role (only staff sees Back button)
   const [staffRole, setStaffRole] = useState(null); // "kitchen" | "waiter" | null
 
+  // ✅ Extras modal state
+  const [extrasModalOpen, setExtrasModalOpen] = useState(false);
+  const [pendingExtra, setPendingExtra] = useState(null); // {id,name,price_cents}
+  const [extraTargetIdx, setExtraTargetIdx] = useState(null); // selected cart line index
+
   const grouped = useMemo(() => groupByCategory(menu), [menu]);
 
   const filteredGrouped = useMemo(() => {
@@ -110,7 +119,24 @@ export default function OrderPage() {
       .filter(([, list]) => list.length > 0);
   }, [grouped, search]);
 
-  const cartTotal = useMemo(() => cart.reduce((sum, x) => sum + x.price_cents * x.qty, 0), [cart]);
+  const cartTotal = useMemo(() => {
+    let total = 0;
+    for (const line of cart) {
+      total += (line.price_cents || 0) * (line.qty || 0);
+      for (const ex of line.extras || []) {
+        total += (ex.price_cents || 0) * (ex.qty || 0);
+      }
+    }
+    return total;
+  }, [cart]);
+
+  function ensureLineExtras(line) {
+    return { ...line, extras: Array.isArray(line.extras) ? line.extras : [] };
+  }
+
+  function isExtrasItem(item) {
+    return String(item?.category || "").trim() === EXTRAS_CATEGORY;
+  }
 
   async function loadMenu() {
     setIsMenuLoading(true);
@@ -229,14 +255,12 @@ export default function OrderPage() {
     const s = String(status).toLowerCase();
 
     if (s === "ready") {
-      // vibrate
       try {
         if (navigator.vibrate) navigator.vibrate([200, 80, 200, 80, 250, 80, 300]);
       } catch {
         // ignore
       }
 
-      // sound (only once per order)
       if (soundOn && lastReadyOrderIdRef.current !== orderId) {
         try {
           initSound();
@@ -248,36 +272,98 @@ export default function OrderPage() {
       }
     }
 
-    // reset guard when leaving READY
     if (s !== "ready" && lastReadyOrderIdRef.current === orderId) {
       lastReadyOrderIdRef.current = null;
     }
   }, [status, soundOn, orderId]);
 
-  function addToCart(item) {
+  function addMainToCart(item) {
     setCart((prev) => {
-      const idx = prev.findIndex((x) => x.menu_item_id === item.id && (x.item_notes || "") === "");
+      const next = prev.map(ensureLineExtras);
+      const idx = next.findIndex((x) => x.menu_item_id === item.id && (x.item_notes || "") === "");
       if (idx >= 0) {
-        const copy = [...prev];
+        const copy = [...next];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
         return copy;
       }
       return [
-        ...prev,
+        ...next,
         {
           menu_item_id: item.id,
           name: item.name,
           price_cents: item.price_cents,
           qty: 1,
           item_notes: "",
+          extras: [],
         },
       ];
     });
   }
 
+  function openExtrasModal(extraItem) {
+    setErr("");
+    setMsg("");
+
+    if (cart.length === 0) {
+      setErr("Please add a main item first, then choose extras.");
+      return;
+    }
+
+    setPendingExtra({
+      id: extraItem.id,
+      name: extraItem.name,
+      price_cents: extraItem.price_cents,
+    });
+    setExtraTargetIdx(0);
+    setExtrasModalOpen(true);
+  }
+
+  function closeExtrasModal() {
+    setExtrasModalOpen(false);
+    setPendingExtra(null);
+    setExtraTargetIdx(null);
+  }
+
+  function confirmAddExtra() {
+    if (!pendingExtra) return;
+    const idx = typeof extraTargetIdx === "number" ? extraTargetIdx : null;
+    if (idx === null || idx < 0 || idx >= cart.length) {
+      setErr("Please choose which item this extra is for.");
+      return;
+    }
+
+    setCart((prev) => {
+      const next = prev.map(ensureLineExtras);
+      const parent = next[idx];
+      const extras = [...(parent.extras || [])];
+
+      const exIdx = extras.findIndex((e) => e.menu_item_id === pendingExtra.id);
+      if (exIdx >= 0) {
+        extras[exIdx] = { ...extras[exIdx], qty: extras[exIdx].qty + 1 };
+      } else {
+        extras.push({
+          menu_item_id: pendingExtra.id,
+          name: pendingExtra.name,
+          price_cents: pendingExtra.price_cents,
+          qty: 1,
+        });
+      }
+
+      next[idx] = { ...parent, extras };
+      return next;
+    });
+
+    closeExtrasModal();
+  }
+
+  function addToCart(item) {
+    if (isExtrasItem(item)) openExtrasModal(item);
+    else addMainToCart(item);
+  }
+
   function decLine(i) {
     setCart((prev) => {
-      const copy = [...prev];
+      const copy = prev.map(ensureLineExtras);
       copy[i] = { ...copy[i], qty: copy[i].qty - 1 };
       if (copy[i].qty <= 0) copy.splice(i, 1);
       return copy;
@@ -286,7 +372,7 @@ export default function OrderPage() {
 
   function incLine(i) {
     setCart((prev) => {
-      const copy = [...prev];
+      const copy = prev.map(ensureLineExtras);
       copy[i] = { ...copy[i], qty: copy[i].qty + 1 };
       return copy;
     });
@@ -294,9 +380,36 @@ export default function OrderPage() {
 
   function setNote(i, note) {
     setCart((prev) => {
-      const copy = [...prev];
+      const copy = prev.map(ensureLineExtras);
       copy[i] = { ...copy[i], item_notes: note };
       return copy;
+    });
+  }
+
+  function decExtra(parentIdx, exIdx) {
+    setCart((prev) => {
+      const next = prev.map(ensureLineExtras);
+      const parent = next[parentIdx];
+      const extras = [...(parent.extras || [])];
+
+      extras[exIdx] = { ...extras[exIdx], qty: extras[exIdx].qty - 1 };
+      if (extras[exIdx].qty <= 0) extras.splice(exIdx, 1);
+
+      next[parentIdx] = { ...parent, extras };
+      return next;
+    });
+  }
+
+  function incExtra(parentIdx, exIdx) {
+    setCart((prev) => {
+      const next = prev.map(ensureLineExtras);
+      const parent = next[parentIdx];
+      const extras = [...(parent.extras || [])];
+
+      extras[exIdx] = { ...extras[exIdx], qty: extras[exIdx].qty + 1 };
+
+      next[parentIdx] = { ...parent, extras };
+      return next;
     });
   }
 
@@ -307,11 +420,23 @@ export default function OrderPage() {
     if (!name.trim()) return setErr("Please enter your name.");
     if (cart.length === 0) return setErr("Your cart is empty.");
 
-    const payloadItems = cart.map((x) => ({
-      menu_item_id: x.menu_item_id,
-      qty: x.qty,
-      item_notes: x.item_notes || "",
-    }));
+    // ✅ Flatten payload: extras become regular items with note "EXTRA FOR: <parent name>"
+    const payloadItems = [];
+    for (const line of cart.map(ensureLineExtras)) {
+      payloadItems.push({
+        menu_item_id: line.menu_item_id,
+        qty: line.qty,
+        item_notes: line.item_notes || "",
+      });
+
+      for (const ex of line.extras || []) {
+        payloadItems.push({
+          menu_item_id: ex.menu_item_id,
+          qty: ex.qty,
+          item_notes: `EXTRA FOR: ${line.name}`,
+        });
+      }
+    }
 
     setIsPlacing(true);
     const { data, error } = await supabase.rpc("place_order", {
@@ -388,7 +513,9 @@ export default function OrderPage() {
         >
           <div>
             <h2 style={{ margin: 0 }}>Menu</h2>
-            <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>Tap an item to add it to your cart.</div>
+            <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>
+              Tap an item to add it to your cart.
+            </div>
           </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -435,12 +562,16 @@ export default function OrderPage() {
 
         <div style={{ marginTop: 12 }}>
           {isMenuLoading ? <div style={{ color: "#666" }}>Loading menu…</div> : null}
-          {!isMenuLoading && !err && menu.length === 0 ? <div style={{ color: "#777" }}>Menu is empty.</div> : null}
+          {!isMenuLoading && !err && menu.length === 0 ? (
+            <div style={{ color: "#777" }}>Menu is empty.</div>
+          ) : null}
         </div>
 
         <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
           {filteredGrouped.map(([cat, list]) => {
             const expanded = expandedCats[cat] ?? true;
+            const isExtras = cat === EXTRAS_CATEGORY;
+
             return (
               <div key={cat} style={{ borderTop: "1px solid #f1f1f1", paddingTop: 10 }}>
                 <button
@@ -459,7 +590,14 @@ export default function OrderPage() {
                     gap: 10,
                   }}
                 >
-                  <h3 style={{ margin: 0 }}>{cat}</h3>
+                  <h3 style={{ margin: 0 }}>
+                    {cat}{" "}
+                    {isExtras ? (
+                      <span style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>
+                        (choose which item it’s for)
+                      </span>
+                    ) : null}
+                  </h3>
                   <span style={{ color: "#666", fontSize: 12 }}>
                     {expanded ? "Hide" : "Show"} • {list.length}
                   </span>
@@ -482,26 +620,51 @@ export default function OrderPage() {
                           boxShadow: "0 6px 14px rgba(0,0,0,0.04)",
                         }}
                       >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 12,
+                            alignItems: "flex-start",
+                          }}
+                        >
                           <div>
                             <div style={{ fontWeight: 900 }}>{it.name}</div>
-                            {it.description ? <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div> : null}
+                            {it.description ? (
+                              <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div>
+                            ) : null}
                           </div>
 
                           <div style={{ fontWeight: 900 }}>{money(it.price_cents)}</div>
                         </div>
 
-                        <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                          <div style={{ color: "#2563eb", fontSize: 12, fontWeight: 800 }}>Tap to add</div>
+                        <div
+                          style={{
+                            marginTop: 8,
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 10,
+                          }}
+                        >
+                          <div
+                            style={{
+                              color: isExtras ? "#7c3aed" : "#2563eb",
+                              fontSize: 12,
+                              fontWeight: 800,
+                            }}
+                          >
+                            {isExtras ? "Tap to attach extra" : "Tap to add"}
+                          </div>
                           <div
                             style={{
                               padding: "5px 10px",
                               borderRadius: 999,
-                              background: "#eff6ff",
-                              border: "1px solid #dbeafe",
+                              background: isExtras ? "#f5f3ff" : "#eff6ff",
+                              border: isExtras ? "1px solid #e9d5ff" : "1px solid #dbeafe",
                               fontSize: 12,
                               fontWeight: 900,
-                              color: "#1d4ed8",
+                              color: isExtras ? "#6d28d9" : "#1d4ed8",
                             }}
                           >
                             + Add
@@ -573,7 +736,15 @@ export default function OrderPage() {
         ) : (
           <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
             {cart.map((x, i) => (
-              <div key={`${x.menu_item_id}-${i}`} style={{ border: "1px solid #f0f0f0", borderRadius: 14, padding: 10, background: "#fafafa" }}>
+              <div
+                key={`${x.menu_item_id}-${i}`}
+                style={{
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 14,
+                  padding: 10,
+                  background: "#fafafa",
+                }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                   <div style={{ fontWeight: 900 }}>{x.name}</div>
                   <div style={{ fontWeight: 900 }}>{money(x.price_cents * x.qty)}</div>
@@ -584,7 +755,14 @@ export default function OrderPage() {
                     <button
                       type="button"
                       onClick={() => decLine(i)}
-                      style={{ padding: "6px 10px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer", fontWeight: 900 }}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #ddd",
+                        background: "white",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
                       aria-label="decrease"
                     >
                       −
@@ -593,7 +771,14 @@ export default function OrderPage() {
                     <button
                       type="button"
                       onClick={() => incLine(i)}
-                      style={{ padding: "6px 10px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer", fontWeight: 900 }}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #ddd",
+                        background: "white",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
                       aria-label="increase"
                     >
                       +
@@ -606,8 +791,80 @@ export default function OrderPage() {
                   value={x.item_notes}
                   onChange={(e) => setNote(i, e.target.value)}
                   placeholder="Notes (optional) e.g. no onion"
-                  style={{ marginTop: 8, width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ddd", background: "white" }}
+                  style={{
+                    marginTop: 8,
+                    width: "100%",
+                    padding: 10,
+                    borderRadius: 12,
+                    border: "1px solid #ddd",
+                    background: "white",
+                  }}
                 />
+
+                {/* ✅ Extras nested under parent item */}
+                {Array.isArray(x.extras) && x.extras.length > 0 && (
+                  <div style={{ marginTop: 10, borderTop: "1px dashed #ddd", paddingTop: 10 }}>
+                    <div style={{ fontWeight: 900, fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                      Extras for {x.name}
+                    </div>
+
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {x.extras.map((ex, exIdx) => (
+                        <div
+                          key={`${ex.menu_item_id}-${exIdx}`}
+                          style={{
+                            background: "white",
+                            border: "1px solid #eee",
+                            borderRadius: 12,
+                            padding: 10,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div style={{ fontWeight: 900 }}>{ex.name}</div>
+                            <div style={{ fontWeight: 900 }}>{money(ex.price_cents * ex.qty)}</div>
+                          </div>
+
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <button
+                                type="button"
+                                onClick={() => decExtra(i, exIdx)}
+                                style={{
+                                  padding: "6px 10px",
+                                  borderRadius: 12,
+                                  border: "1px solid #ddd",
+                                  background: "white",
+                                  cursor: "pointer",
+                                  fontWeight: 900,
+                                }}
+                                aria-label="decrease extra"
+                              >
+                                −
+                              </button>
+                              <b>{ex.qty}</b>
+                              <button
+                                type="button"
+                                onClick={() => incExtra(i, exIdx)}
+                                style={{
+                                  padding: "6px 10px",
+                                  borderRadius: 12,
+                                  border: "1px solid #ddd",
+                                  background: "white",
+                                  cursor: "pointer",
+                                  fontWeight: 900,
+                                }}
+                                aria-label="increase extra"
+                              >
+                                +
+                              </button>
+                            </div>
+                            <div style={{ color: "#666", fontSize: 12 }}>{money(ex.price_cents)} each</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -647,7 +904,16 @@ export default function OrderPage() {
             <button
               type="button"
               onClick={startNewOrder}
-              style={{ width: "100%", marginTop: 10, padding: 10, borderRadius: 14, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+              style={{
+                width: "100%",
+                marginTop: 10,
+                padding: 10,
+                borderRadius: 14,
+                border: "1px solid #ddd",
+                background: "white",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
             >
               Start a new order
             </button>
@@ -830,6 +1096,138 @@ export default function OrderPage() {
       <div style={{ marginTop: 16, color: "#777", fontSize: 12 }}>
         Tip: Turn Sound ON (in the cart) to hear a ding when your order becomes READY.
       </div>
+
+      {/* ✅ Extras modal */}
+      {extrasModalOpen && pendingExtra && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={closeExtrasModal}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              background: "white",
+              borderRadius: 16,
+              border: "1px solid #eee",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
+              <div style={{ fontSize: 16, fontWeight: 950 }}>Add Extra</div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                Choose which item this extra is for.
+              </div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              <div
+                style={{
+                  border: "1px solid #eee",
+                  borderRadius: 14,
+                  padding: 12,
+                  background: "#fafafa",
+                }}
+              >
+                <div style={{ fontWeight: 950 }}>{pendingExtra.name}</div>
+                <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                  {money(pendingExtra.price_cents)}
+                </div>
+              </div>
+
+              <div style={{ marginTop: 12, fontWeight: 900, fontSize: 13 }}>
+                Select parent item:
+              </div>
+
+              <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                {cart.map((line, idx) => (
+                  <button
+                    key={`${line.menu_item_id}-${idx}`}
+                    type="button"
+                    onClick={() => setExtraTargetIdx(idx)}
+                    style={{
+                      textAlign: "left",
+                      padding: 12,
+                      borderRadius: 14,
+                      border: "1px solid #e5e5e5",
+                      background: extraTargetIdx === idx ? "#111" : "white",
+                      color: extraTargetIdx === idx ? "white" : "#111",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      alignItems: "center",
+                    }}
+                  >
+                    <span>
+                      {line.name} <span style={{ opacity: 0.75, fontWeight: 800 }}>(x{line.qty})</span>
+                    </span>
+                    <span style={{ opacity: 0.75, fontWeight: 800 }}>
+                      {extraTargetIdx === idx ? "Selected" : "Select"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div
+              style={{
+                padding: 14,
+                borderTop: "1px solid #eee",
+                display: "flex",
+                gap: 10,
+                justifyContent: "flex-end",
+                flexWrap: "wrap",
+              }}
+            >
+              <button
+                type="button"
+                onClick={closeExtrasModal}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid #ddd",
+                  background: "white",
+                  fontWeight: 900,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={confirmAddExtra}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "#2563eb",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                }}
+              >
+                Add to selected item
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
