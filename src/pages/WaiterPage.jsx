@@ -21,10 +21,13 @@ function minutesAgo(dateStr) {
 }
 
 function statusLabel(s) {
+  const v = String(s || "").toLowerCase();
+  if (v === "awaiting_payment") return "AWAITING PAYMENT";
   return String(s || "").toUpperCase();
 }
 
 function chipStyle(status) {
+  const s = String(status || "").toLowerCase();
   const base = {
     display: "inline-block",
     padding: "4px 10px",
@@ -33,13 +36,13 @@ function chipStyle(status) {
     fontWeight: 900,
     border: "1px solid #e5e5e5",
     background: "#f7f7f7",
+    whiteSpace: "nowrap",
   };
-
-  if (status === "queued") return { ...base, background: "#f2f7ff", borderColor: "#dbeafe" };
-  if (status === "accepted") return { ...base, background: "#f5f3ff", borderColor: "#e9d5ff" };
-  if (status === "preparing") return { ...base, background: "#fff7ed", borderColor: "#fed7aa" };
-  if (status === "ready") return { ...base, background: "#ecfdf5", borderColor: "#bbf7d0" };
-  if (status === "awaiting_payment") return { ...base, background: "#fefce8", borderColor: "#fde68a" };
+  if (s === "queued") return { ...base, background: "#f2f7ff", borderColor: "#dbeafe" };
+  if (s === "accepted") return { ...base, background: "#f5f3ff", borderColor: "#e9d5ff" };
+  if (s === "preparing") return { ...base, background: "#fff7ed", borderColor: "#fed7aa" };
+  if (s === "ready") return { ...base, background: "#ecfdf5", borderColor: "#bbf7d0" };
+  if (s === "awaiting_payment") return { ...base, background: "#fefce8", borderColor: "#fde68a" };
   return base;
 }
 
@@ -59,7 +62,7 @@ export default function WaiterPage() {
 
   // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("waiter_sound") === "1");
-  const prevStatusMapRef = useRef(new Map());
+  const prevStatusMapRef = useRef(new Map()); // orderId -> lastStatus
 
   // actions
   const [busyOrderId, setBusyOrderId] = useState(null);
@@ -94,10 +97,7 @@ export default function WaiterPage() {
       }
 
       const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") {
-        nav("/kitchen", { replace: true });
-        return;
-      }
+      if (r !== "waiter") nav("/kitchen", { replace: true });
     }
 
     check();
@@ -150,7 +150,6 @@ export default function WaiterPage() {
           initSound();
           ding();
         }
-
         prevMap.set(o.id, now);
       }
     } else {
@@ -175,13 +174,14 @@ export default function WaiterPage() {
     return (orders || []).map((o) => ({
       ...o,
       mins: minutesAgo(o.created_at),
+      _statusLower: String(o.status || "").toLowerCase(),
     }));
   }, [orders]);
 
   const byStatus = useMemo(() => {
     const map = new Map();
     for (const o of ordersWithAge) {
-      const st = String(o.status || "").toLowerCase();
+      const st = o._statusLower;
       if (!map.has(st)) map.set(st, []);
       map.get(st).push(o);
     }
@@ -191,8 +191,8 @@ export default function WaiterPage() {
   const flatSorted = useMemo(() => {
     const statusRank = new Map(COLUMNS.map((s, i) => [s, i]));
     return [...ordersWithAge].sort((a, b) => {
-      const ra = statusRank.get(String(a.status || "").toLowerCase()) ?? 999;
-      const rb = statusRank.get(String(b.status || "").toLowerCase()) ?? 999;
+      const ra = statusRank.get(a._statusLower) ?? 999;
+      const rb = statusRank.get(b._statusLower) ?? 999;
       if (ra !== rb) return ra - rb;
       return new Date(a.created_at) - new Date(b.created_at);
     });
@@ -206,6 +206,7 @@ export default function WaiterPage() {
 
     const prevOrders = orders;
 
+    // optimistic update
     if (newStatus === "cancelled" || newStatus === "paid") {
       setOrders((cur) => cur.filter((o) => o.id !== orderId));
     } else {
@@ -248,9 +249,16 @@ export default function WaiterPage() {
     }
   }
 
-  const ActionRow = ({ o }) => {
+  function ActionRow({ o }) {
     const st = String(o.status || "").toLowerCase();
     const busy = busyOrderId === o.id;
+
+    const btnBase = {
+      padding: "6px 10px",
+      borderRadius: 10,
+      cursor: "pointer",
+      opacity: busy ? 0.6 : 1,
+    };
 
     return (
       <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
@@ -259,10 +267,7 @@ export default function WaiterPage() {
           disabled={busy}
           onClick={() => setStatus(o.id, "cancelled")}
           style={{
-            padding: "6px 10px",
-            borderRadius: 10,
-            cursor: "pointer",
-            opacity: busy ? 0.6 : 1,
+            ...btnBase,
             border: "1px solid #fecaca",
             background: "#fff1f2",
             fontWeight: 900,
@@ -272,25 +277,25 @@ export default function WaiterPage() {
         </button>
 
         {st === "queued" && (
-          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "accepted")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "accepted")} style={btnBase}>
             {busy ? "Updating…" : "Accept"}
           </button>
         )}
 
         {st === "accepted" && (
-          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "preparing")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "preparing")} style={btnBase}>
             {busy ? "Updating…" : "Start Prep"}
           </button>
         )}
 
         {st === "preparing" && (
-          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "ready")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "ready")} style={btnBase}>
             {busy ? "Updating…" : "Ready"}
           </button>
         )}
 
         {st === "ready" && (
-          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "awaiting_payment")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "awaiting_payment")} style={btnBase}>
             {busy ? "Updating…" : "Complete"}
           </button>
         )}
@@ -301,10 +306,7 @@ export default function WaiterPage() {
             disabled={busy}
             onClick={() => setStatus(o.id, "paid")}
             style={{
-              padding: "6px 10px",
-              borderRadius: 10,
-              cursor: "pointer",
-              opacity: busy ? 0.6 : 1,
+              ...btnBase,
               border: "1px solid #bbf7d0",
               background: "#ecfdf5",
               fontWeight: 900,
@@ -315,7 +317,46 @@ export default function WaiterPage() {
         )}
       </div>
     );
-  };
+  }
+
+  function OrderCard({ o, showAgeRight = true }) {
+    const style = overdueCardStyle(o.mins);
+    return (
+      <div
+        style={{
+          border: `1px solid ${style.borderColor}`,
+          background: style.background,
+          borderRadius: 14,
+          padding: 12,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+          <div>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>
+              #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"}
+            </div>
+            <div style={{ color: "#666", marginTop: 2 }}>{o.customer_name}</div>
+          </div>
+
+          <div style={{ textAlign: "right" }}>
+            <div style={chipStyle(o.status)}>{statusLabel(o.status)}</div>
+            {showAgeRight && <div style={{ color: "#666", fontSize: 12, marginTop: 6 }}>{o.mins} min ago</div>}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+          {(o.order_items || []).map((it) => (
+            <div key={it.id} style={{ fontSize: 13 }}>
+              <b>{it.qty}×</b> {it.name}
+              {it.item_notes ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
+            </div>
+          ))}
+        </div>
+
+        <ActionRow o={o} />
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 1200, margin: "0 auto" }}>
@@ -408,43 +449,23 @@ export default function WaiterPage() {
       {compact ? (
         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
           {flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
-
-          {flatSorted.map((o) => {
-            const style = overdueCardStyle(o.mins);
-            return (
-              <div key={o.id} style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                  <div>
-                    <div style={{ fontWeight: 900, fontSize: 16 }}>
-                      #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"}
-                    </div>
-                    <div style={{ color: "#666", marginTop: 2 }}>{o.customer_name}</div>
-                  </div>
-
-                  <div style={{ textAlign: "right" }}>
-                    <div style={chipStyle(String(o.status || "").toLowerCase())}>{statusLabel(o.status)}</div>
-                    <div style={{ color: "#666", fontSize: 12, marginTop: 6 }}>{o.mins} min ago</div>
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-                  {(o.order_items || []).map((it) => (
-                    <div key={it.id} style={{ fontSize: 13 }}>
-                      <b>{it.qty}×</b> {it.name}
-                      {it.item_notes ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
-                    </div>
-                  ))}
-                </div>
-
-                <ActionRow o={o} />
-              </div>
-            );
-          })}
+          {flatSorted.map((o) => (
+            <OrderCard key={o.id} o={o} />
+          ))}
         </div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginTop: 16 }}>
           {COLUMNS.map((st) => (
-            <div key={st} style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fafafa", minHeight: 260 }}>
+            <div
+              key={st}
+              style={{
+                border: "1px solid #eee",
+                borderRadius: 14,
+                padding: 12,
+                background: "#fafafa",
+                minHeight: 260,
+              }}
+            >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <h2 style={{ margin: 0, textTransform: "capitalize" }}>{st.replace("_", " ")}</h2>
                 <div style={{ color: "#666", fontSize: 12 }}>{(byStatus.get(st) || []).length}</div>
@@ -452,34 +473,9 @@ export default function WaiterPage() {
 
               <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
                 {(byStatus.get(st) || []).length === 0 ? <div style={{ color: "#777" }}>No orders</div> : null}
-
-                {(byStatus.get(st) || []).map((o) => {
-                  const style = overdueCardStyle(o.mins);
-                  return (
-                    <div key={o.id} style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div>
-                          <div style={{ fontWeight: 900 }}>
-                            #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"}
-                          </div>
-                          <div style={{ color: "#666" }}>{o.customer_name}</div>
-                        </div>
-                        <div style={{ color: "#666", fontSize: 12 }}>{o.mins} min</div>
-                      </div>
-
-                      <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                        {(o.order_items || []).map((it) => (
-                          <div key={it.id} style={{ fontSize: 13 }}>
-                            <b>{it.qty}×</b> {it.name}
-                            {it.item_notes ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
-                          </div>
-                        ))}
-                      </div>
-
-                      <ActionRow o={o} />
-                    </div>
-                  );
-                })}
+                {(byStatus.get(st) || []).map((o) => (
+                  <OrderCard key={o.id} o={o} showAgeRight={false} />
+                ))}
               </div>
             </div>
           ))}
