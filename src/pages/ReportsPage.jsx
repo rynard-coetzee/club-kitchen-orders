@@ -8,7 +8,6 @@ function money(cents) {
 }
 
 function toLocalInputValue(d) {
-  // yyyy-mm-dd for <input type="date">
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
@@ -22,6 +21,13 @@ function addDays(d, days) {
   const x = new Date(d);
   x.setDate(x.getDate() + days);
   return x;
+}
+
+function safeDateFromYMD(ymd, fallbackDate) {
+  // ymd should be "YYYY-MM-DD"
+  const d = new Date(ymd);
+  if (Number.isNaN(d.getTime())) return fallbackDate;
+  return d;
 }
 
 function downloadCSV(filename, rows) {
@@ -49,21 +55,22 @@ export default function ReportsPage() {
   const nav = useNavigate();
 
   const [authReady, setAuthReady] = useState(false);
-  const [role, setRole] = useState(null); // kitchen/waiter/null
+  const [role, setRole] = useState(null);
 
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [lastLoadedAt, setLastLoadedAt] = useState(null);
 
   // Filters
   const [preset, setPreset] = useState("7"); // "0"(today) | "7" | "30" | "custom"
   const [fromDate, setFromDate] = useState(() => toLocalInputValue(addDays(new Date(), -7)));
-  const [toDate, setToDate] = useState(() => toLocalInputValue(new Date())); // inclusive in UI, we’ll +1 day in query
+  const [toDate, setToDate] = useState(() => toLocalInputValue(new Date())); // inclusive UI
 
   const [statusFilter, setStatusFilter] = useState("completed"); // completed | active | all
   const [typeFilter, setTypeFilter] = useState("all"); // all | dine_in | collection
   const [search, setSearch] = useState("");
 
-  const [orders, setOrders] = useState([]); // rows from RPC
+  const [orders, setOrders] = useState([]);
 
   // Staff-only gate
   useEffect(() => {
@@ -119,24 +126,25 @@ export default function ReportsPage() {
   useEffect(() => {
     if (preset === "custom") return;
 
-    const today = new Date();
-    const start = startOfDay(today);
+    const today = startOfDay(new Date());
 
     if (preset === "0") {
-      setFromDate(toLocalInputValue(start));
-      setToDate(toLocalInputValue(start));
+      setFromDate(toLocalInputValue(today));
+      setToDate(toLocalInputValue(today));
     } else {
       const days = Number(preset);
-      setFromDate(toLocalInputValue(addDays(start, -days)));
-      setToDate(toLocalInputValue(start));
+      setFromDate(toLocalInputValue(addDays(today, -days)));
+      setToDate(toLocalInputValue(today));
     }
   }, [preset]);
 
   const queryRange = useMemo(() => {
-    const from = startOfDay(new Date(fromDate));
-    // UI toDate is inclusive. SQL uses < p_to, so we go to next day 00:00
-    const toInclusive = startOfDay(new Date(toDate));
+    const today = startOfDay(new Date());
+
+    const from = startOfDay(safeDateFromYMD(fromDate, addDays(today, -7)));
+    const toInclusive = startOfDay(safeDateFromYMD(toDate, today));
     const toExclusive = addDays(toInclusive, 1);
+
     return { from, to: toExclusive };
   }, [fromDate, toDate]);
 
@@ -144,27 +152,37 @@ export default function ReportsPage() {
     setErr("");
     setLoading(true);
 
-    const { data, error } = await supabase.rpc("staff_reports_orders", {
-      p_from: queryRange.from.toISOString(),
-      p_to: queryRange.to.toISOString(),
-    });
+    try {
+      const fromIso = queryRange.from.toISOString();
+      const toIso = queryRange.to.toISOString();
 
-    setLoading(false);
+      const { data, error } = await supabase.rpc("staff_reports_orders", {
+        p_from: fromIso,
+        p_to: toIso,
+      });
 
-    if (error) {
-      setErr(error.message);
-      return;
+      if (error) {
+        setErr(error.message);
+        setOrders([]);
+        return;
+      }
+
+      const normalized = (data || []).map((o) => ({
+        ...o,
+        items: Array.isArray(o.items) ? o.items : o.items || [],
+        status: String(o.status || "").toLowerCase(),
+        order_type: String(o.order_type || "").toLowerCase(),
+        customer_name: o.customer_name || "",
+      }));
+
+      setOrders(normalized);
+      setLastLoadedAt(new Date());
+    } catch (e) {
+      setErr(e?.message || "Reports failed to load.");
+      setOrders([]);
+    } finally {
+      setLoading(false);
     }
-
-    const normalized = (data || []).map((o) => ({
-      ...o,
-      items: Array.isArray(o.items) ? o.items : o.items || [],
-      status: String(o.status || "").toLowerCase(),
-      order_type: String(o.order_type || "").toLowerCase(),
-      customer_name: o.customer_name || "",
-    }));
-
-    setOrders(normalized);
   }
 
   useEffect(() => {
@@ -203,18 +221,16 @@ export default function ReportsPage() {
     const count = filtered.length;
     const total = filtered.reduce((sum, o) => sum + Number(o.total_cents || 0), 0);
     const avg = count ? Math.round(total / count) : 0;
-
     return { count, total, avg };
   }, [filtered]);
 
   const topItems = useMemo(() => {
-    const map = new Map(); // name -> {qty, revenue}
+    const map = new Map();
     for (const o of filtered) {
       for (const it of o.items || []) {
         const name = it.name || "Unknown";
         const qty = Number(it.qty || 0);
         const rev = qty * Number(it.unit_price_cents || 0);
-
         if (!map.has(name)) map.set(name, { name, qty: 0, revenue: 0 });
         const row = map.get(name);
         row.qty += qty;
@@ -225,16 +241,7 @@ export default function ReportsPage() {
   }, [filtered]);
 
   function exportCSV() {
-    const header = [
-      "order_number",
-      "created_at",
-      "status",
-      "order_type",
-      "customer_name",
-      "total",
-      "items",
-    ];
-
+    const header = ["order_number", "created_at", "status", "order_type", "customer_name", "total", "items"];
     const rows = filtered.map((o) => {
       const items = (o.items || [])
         .map((it) => {
@@ -242,7 +249,6 @@ export default function ReportsPage() {
           return `${it.qty}x ${it.name}${note}`;
         })
         .join(" | ");
-
       return [
         o.order_number,
         new Date(o.created_at).toLocaleString(),
@@ -254,10 +260,7 @@ export default function ReportsPage() {
       ];
     });
 
-    downloadCSV(
-      `club_kitchen_reports_${fromDate}_to_${toDate}.csv`,
-      [header, ...rows]
-    );
+    downloadCSV(`club_kitchen_reports_${fromDate}_to_${toDate}.csv`, [header, ...rows]);
   }
 
   async function logout() {
@@ -270,12 +273,37 @@ export default function ReportsPage() {
     }
   }
 
+  function chipStyle(status) {
+    const base = {
+      display: "inline-block",
+      padding: "4px 10px",
+      borderRadius: 999,
+      fontSize: 12,
+      fontWeight: 900,
+      border: "1px solid #e5e5e5",
+      background: "#f7f7f7",
+    };
+    if (status === "queued") return { ...base, background: "#f2f7ff", borderColor: "#dbeafe" };
+    if (status === "accepted") return { ...base, background: "#f5f3ff", borderColor: "#e9d5ff" };
+    if (status === "preparing") return { ...base, background: "#fff7ed", borderColor: "#fed7aa" };
+    if (status === "ready") return { ...base, background: "#ecfdf5", borderColor: "#bbf7d0" };
+    if (status === "completed") return { ...base, background: "#f3f4f6", borderColor: "#e5e7eb" };
+    return base;
+  }
+
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 1200, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: 0 }}>Reports</h1>
-          <div style={{ color: "#666", marginTop: 4 }}>Orders, totals, and trends.</div>
+          <div style={{ color: "#666", marginTop: 4 }}>
+            Orders, totals, and trends.
+            {lastLoadedAt ? (
+              <span style={{ marginLeft: 10, fontSize: 12 }}>
+                Last loaded: <b>{lastLoadedAt.toLocaleTimeString()}</b>
+              </span>
+            ) : null}
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -327,9 +355,25 @@ export default function ReportsPage() {
 
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ color: "#666" }}>From</span>
-            <input type="date" value={fromDate} onChange={(e) => { setPreset("custom"); setFromDate(e.target.value); }} style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }} />
+            <input
+              type="date"
+              value={fromDate}
+              onChange={(e) => {
+                setPreset("custom");
+                setFromDate(e.target.value || toLocalInputValue(addDays(new Date(), -7)));
+              }}
+              style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+            />
             <span style={{ color: "#666" }}>To</span>
-            <input type="date" value={toDate} onChange={(e) => { setPreset("custom"); setToDate(e.target.value); }} style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }} />
+            <input
+              type="date"
+              value={toDate}
+              onChange={(e) => {
+                setPreset("custom");
+                setToDate(e.target.value || toLocalInputValue(new Date()));
+              }}
+              style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+            />
           </div>
 
           <button
@@ -431,13 +475,11 @@ export default function ReportsPage() {
                     <div style={{ fontWeight: 950, fontSize: 16 }}>
                       #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"} • {o.customer_name || "—"}
                     </div>
-                    <div style={{ color: "#666", marginTop: 4 }}>
-                      {new Date(o.created_at).toLocaleString()}
-                    </div>
+                    <div style={{ color: "#666", marginTop: 4 }}>{new Date(o.created_at).toLocaleString()}</div>
                   </div>
 
                   <div style={{ textAlign: "right" }}>
-                    <div style={chipStyle(o.status)}>{statusLabel(o.status)}</div>
+                    <div style={chipStyle(o.status)}>{String(o.status || "").toUpperCase()}</div>
                     <div style={{ marginTop: 6, fontWeight: 950 }}>{money(o.total_cents)}</div>
                   </div>
                 </div>
