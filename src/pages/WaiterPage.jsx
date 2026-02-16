@@ -55,10 +55,9 @@ function overdueCardStyle(mins) {
 export default function WaiterPage() {
   const nav = useNavigate();
 
-  const [session, setSession] = useState(null);
-  const [authReady, setAuthReady] = useState(false); // ✅ prevents “refresh then disappear”
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
+  const [busyOrderId, setBusyOrderId] = useState(null);
 
   const [compact, setCompact] = useState(false);
 
@@ -66,8 +65,28 @@ export default function WaiterPage() {
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("waiter_sound") === "1");
   const prevStatusMapRef = useRef(new Map()); // orderId -> lastStatus
 
-  // actions
-  const [busyOrderId, setBusyOrderId] = useState(null);
+  // prevent double-intervals
+  const pollRef = useRef(null);
+  const aliveRef = useRef(true);
+
+  // ✅ Always be able to rehydrate a session on refresh
+  async function ensureSession() {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) return data.session;
+
+    // try refresh once
+    const refreshed = await supabase.auth.refreshSession();
+    return refreshed?.data?.session || null;
+  }
+
+  // ✅ Role check helper
+  async function ensureWaiterRole() {
+    const { data: role, error } = await supabase.rpc("get_my_role");
+    if (error) return { ok: false, reason: "role_error" };
+    const r = String(role || "").trim().toLowerCase();
+    if (r !== "waiter") return { ok: false, reason: "not_waiter", role: r };
+    return { ok: true, role: r };
+  }
 
   // Default compact mode on small screens
   useEffect(() => {
@@ -77,98 +96,43 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
-  // ✅ Robust session hydrate: getSession -> refreshSession once -> then decide
-  async function ensureSession() {
-    const { data } = await supabase.auth.getSession();
-    if (data.session) return data.session;
-
-    // try refresh once (fixes “refresh page then session looks null”)
-    const refreshed = await supabase.auth.refreshSession();
-    return refreshed?.data?.session || null;
-  }
-
-  // Require login + ROLE gate (waiter only) — robust on refresh
-  useEffect(() => {
-    let alive = true;
-
-    async function check() {
-      setAuthReady(false);
-      setErr("");
-
-      const s = await ensureSession();
-      if (!alive) return;
-
-      setSession(s);
-
-      if (!s) {
-        setAuthReady(true);
-        nav("/login", { replace: true });
-        return;
-      }
-
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (!alive) return;
-
-      if (roleErr) {
-        setAuthReady(true);
-        nav("/login", { replace: true });
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") {
-        setAuthReady(true);
-        nav("/kitchen", { replace: true });
-        return;
-      }
-
-      setAuthReady(true);
-    }
-
-    check();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
-      if (!alive) return;
-
-      setSession(s);
-
-      if (!s) {
-        setAuthReady(true);
-        nav("/login", { replace: true });
-        return;
-      }
-
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (!alive) return;
-
-      if (roleErr) {
-        setAuthReady(true);
-        nav("/login", { replace: true });
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") {
-        setAuthReady(true);
-        nav("/kitchen", { replace: true });
-        return;
-      }
-
-      setAuthReady(true);
-    });
-
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
-  }, [nav]);
-
+  // ✅ Main polling load (self-healing after refresh)
   async function load() {
     setErr("");
 
-    // cache-bust param must exist in SQL function signature (p_bust bigint)
+    // 1) ensure session
+    const s = await ensureSession();
+    if (!aliveRef.current) return;
+
+    if (!s) {
+      // no session → stop polling and go login
+      stopPolling();
+      nav("/login", { replace: true });
+      return;
+    }
+
+    // 2) ensure role
+    const roleRes = await ensureWaiterRole();
+    if (!aliveRef.current) return;
+
+    if (!roleRes.ok) {
+      stopPolling();
+      if (roleRes.reason === "not_waiter") {
+        nav("/kitchen", { replace: true });
+      } else {
+        nav("/login", { replace: true });
+      }
+      return;
+    }
+
+    // 3) fetch orders (cache-bust param)
     const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
-    if (error) return setErr(error.message);
+    if (!aliveRef.current) return;
+
+    if (error) {
+      setErr(error.message);
+      return;
+    }
 
     const nextOrders = (data || [])
       .filter((o) => ACTIVE_STATUSES.includes(String(o.status || "").toLowerCase()))
@@ -184,33 +148,45 @@ export default function WaiterPage() {
       for (const o of nextOrders) {
         const prev = String(prevMap.get(o.id) || "").trim().toLowerCase();
         const now = String(o.status || "").trim().toLowerCase();
-
         if (now === "ready" && prev && prev !== "ready") {
           initSound();
           ding();
         }
-
         prevMap.set(o.id, now);
       }
     } else {
       const prevMap = prevStatusMapRef.current;
-      for (const o of nextOrders) {
-        prevMap.set(o.id, String(o.status || "").trim().toLowerCase());
-      }
+      for (const o of nextOrders) prevMap.set(o.id, String(o.status || "").trim().toLowerCase());
     }
 
     setOrders(nextOrders);
   }
 
-  // ✅ Only poll AFTER auth is confirmed (prevents “refresh blanks list”)
-  useEffect(() => {
-    if (!authReady || !session) return;
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
 
+  // ✅ Start polling immediately on mount and keep it alive across refreshes
+  useEffect(() => {
+    aliveRef.current = true;
+
+    // run once immediately
     load();
-    const t = setInterval(load, 3000);
-    return () => clearInterval(t);
+
+    // start interval once
+    if (!pollRef.current) {
+      pollRef.current = setInterval(load, 3000);
+    }
+
+    return () => {
+      aliveRef.current = false;
+      stopPolling();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authReady, session, soundOn]);
+  }, [soundOn]);
 
   const ordersWithAge = useMemo(() => {
     return (orders || []).map((o) => ({
@@ -248,7 +224,7 @@ export default function WaiterPage() {
 
     const prevOrders = orders;
 
-    // optimistic update
+    // optimistic UI
     if (newStatus === "cancelled" || newStatus === "paid") {
       setOrders((cur) => cur.filter((o) => o.id !== orderId));
     } else {
@@ -256,12 +232,9 @@ export default function WaiterPage() {
     }
 
     try {
-      const rpcCall = supabase.rpc("staff_set_status", {
-        p_order_id: orderId,
-        p_new_status: newStatus, // text -> enum in SQL
-      });
-
+      const rpcCall = supabase.rpc("staff_set_status", { p_order_id: orderId, p_new_status: newStatus });
       const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
+
       if (error) {
         setOrders(prevOrders);
         setErr(error.message);
@@ -280,6 +253,7 @@ export default function WaiterPage() {
   async function logout() {
     setErr("");
     try {
+      stopPolling();
       const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
       if (error) {
         setErr(error.message);
@@ -300,6 +274,9 @@ export default function WaiterPage() {
       borderRadius: 10,
       cursor: "pointer",
       opacity: busy ? 0.6 : 1,
+      border: "1px solid #ddd",
+      background: "white",
+      fontWeight: 900,
     };
 
     return (
@@ -312,33 +289,32 @@ export default function WaiterPage() {
             ...btnBase,
             border: "1px solid #fecaca",
             background: "#fff1f2",
-            fontWeight: 900,
           }}
         >
-          {busy ? "Working…" : "Cancel"}
+          Cancel
         </button>
 
         {st === "queued" && (
           <button type="button" disabled={busy} onClick={() => setStatus(o.id, "accepted")} style={btnBase}>
-            {busy ? "Updating…" : "Accept"}
+            Accept
           </button>
         )}
 
         {st === "accepted" && (
           <button type="button" disabled={busy} onClick={() => setStatus(o.id, "preparing")} style={btnBase}>
-            {busy ? "Updating…" : "Start Prep"}
+            Start Prep
           </button>
         )}
 
         {st === "preparing" && (
           <button type="button" disabled={busy} onClick={() => setStatus(o.id, "ready")} style={btnBase}>
-            {busy ? "Updating…" : "Ready"}
+            Ready
           </button>
         )}
 
         {st === "ready" && (
           <button type="button" disabled={busy} onClick={() => setStatus(o.id, "awaiting_payment")} style={btnBase}>
-            {busy ? "Updating…" : "Complete"}
+            Complete
           </button>
         )}
 
@@ -351,27 +327,19 @@ export default function WaiterPage() {
               ...btnBase,
               border: "1px solid #bbf7d0",
               background: "#ecfdf5",
-              fontWeight: 900,
             }}
           >
-            {busy ? "Updating…" : "Paid"}
+            Paid
           </button>
         )}
       </div>
     );
   }
 
-  function OrderCard({ o, showAgeRight = true }) {
+  function OrderCard({ o }) {
     const style = overdueCardStyle(o.mins);
     return (
-      <div
-        style={{
-          border: `1px solid ${style.borderColor}`,
-          background: style.background,
-          borderRadius: 14,
-          padding: 12,
-        }}
-      >
+      <div style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
           <div>
             <div style={{ fontWeight: 900, fontSize: 16 }}>
@@ -382,7 +350,7 @@ export default function WaiterPage() {
 
           <div style={{ textAlign: "right" }}>
             <div style={chipStyle(o.status)}>{statusLabel(o.status)}</div>
-            {showAgeRight && <div style={{ color: "#666", fontSize: 12, marginTop: 6 }}>{o.mins} min ago</div>}
+            <div style={{ color: "#666", fontSize: 12, marginTop: 6 }}>{o.mins} min ago</div>
           </div>
         </div>
 
@@ -412,14 +380,7 @@ export default function WaiterPage() {
           <button
             type="button"
             onClick={() => nav("/order")}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              background: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
+            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
           >
             + New Order
           </button>
@@ -427,14 +388,7 @@ export default function WaiterPage() {
           <button
             type="button"
             onClick={() => nav("/reports")}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              background: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
+            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
           >
             Reports
           </button>
@@ -490,7 +444,7 @@ export default function WaiterPage() {
 
       {compact ? (
         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
-          {authReady && session && flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
+          {flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
           {flatSorted.map((o) => (
             <OrderCard key={o.id} o={o} />
           ))}
@@ -516,7 +470,7 @@ export default function WaiterPage() {
               <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
                 {(byStatus.get(st) || []).length === 0 ? <div style={{ color: "#777" }}>No orders</div> : null}
                 {(byStatus.get(st) || []).map((o) => (
-                  <OrderCard key={o.id} o={o} showAgeRight={false} />
+                  <OrderCard key={o.id} o={o} />
                 ))}
               </div>
             </div>
