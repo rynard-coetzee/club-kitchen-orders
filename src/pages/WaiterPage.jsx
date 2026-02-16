@@ -54,7 +54,9 @@ function overdueCardStyle(mins) {
 
 export default function WaiterPage() {
   const nav = useNavigate();
+
   const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false); // ✅ prevents “refresh then disappear”
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
 
@@ -75,48 +77,84 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
-  // Require login + ROLE gate (waiter only)
+  // ✅ Robust session hydrate: getSession -> refreshSession once -> then decide
+  async function ensureSession() {
+    const { data } = await supabase.auth.getSession();
+    if (data.session) return data.session;
+
+    // try refresh once (fixes “refresh page then session looks null”)
+    const refreshed = await supabase.auth.refreshSession();
+    return refreshed?.data?.session || null;
+  }
+
+  // Require login + ROLE gate (waiter only) — robust on refresh
   useEffect(() => {
     let alive = true;
 
     async function check() {
-      const { data } = await supabase.auth.getSession();
-      const s = data.session || null;
+      setAuthReady(false);
+      setErr("");
+
+      const s = await ensureSession();
       if (!alive) return;
 
       setSession(s);
+
       if (!s) {
-        nav("/login");
+        setAuthReady(true);
+        nav("/login", { replace: true });
         return;
       }
 
       const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
+      if (!alive) return;
+
       if (roleErr) {
-        nav("/login");
+        setAuthReady(true);
+        nav("/login", { replace: true });
         return;
       }
 
       const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") nav("/kitchen", { replace: true });
+      if (r !== "waiter") {
+        setAuthReady(true);
+        nav("/kitchen", { replace: true });
+        return;
+      }
+
+      setAuthReady(true);
     }
 
     check();
 
     const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
+      if (!alive) return;
+
       setSession(s);
+
       if (!s) {
-        nav("/login");
+        setAuthReady(true);
+        nav("/login", { replace: true });
         return;
       }
 
       const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
+      if (!alive) return;
+
       if (roleErr) {
-        nav("/login");
+        setAuthReady(true);
+        nav("/login", { replace: true });
         return;
       }
 
       const r = String(role || "").trim().toLowerCase();
-      if (r !== "waiter") nav("/kitchen", { replace: true });
+      if (r !== "waiter") {
+        setAuthReady(true);
+        nav("/kitchen", { replace: true });
+        return;
+      }
+
+      setAuthReady(true);
     });
 
     return () => {
@@ -128,6 +166,7 @@ export default function WaiterPage() {
   async function load() {
     setErr("");
 
+    // cache-bust param must exist in SQL function signature (p_bust bigint)
     const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
     if (error) return setErr(error.message);
 
@@ -150,6 +189,7 @@ export default function WaiterPage() {
           initSound();
           ding();
         }
+
         prevMap.set(o.id, now);
       }
     } else {
@@ -162,13 +202,15 @@ export default function WaiterPage() {
     setOrders(nextOrders);
   }
 
+  // ✅ Only poll AFTER auth is confirmed (prevents “refresh blanks list”)
   useEffect(() => {
-    if (!session) return;
+    if (!authReady || !session) return;
+
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, soundOn]);
+  }, [authReady, session, soundOn]);
 
   const ordersWithAge = useMemo(() => {
     return (orders || []).map((o) => ({
@@ -216,7 +258,7 @@ export default function WaiterPage() {
     try {
       const rpcCall = supabase.rpc("staff_set_status", {
         p_order_id: orderId,
-        p_new_status: newStatus,
+        p_new_status: newStatus, // text -> enum in SQL
       });
 
       const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
@@ -448,7 +490,7 @@ export default function WaiterPage() {
 
       {compact ? (
         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
-          {flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
+          {authReady && session && flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
           {flatSorted.map((o) => (
             <OrderCard key={o.id} o={o} />
           ))}
