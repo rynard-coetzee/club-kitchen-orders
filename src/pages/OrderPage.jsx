@@ -222,8 +222,9 @@ export default function OrderPage() {
 
     const fetchStatus = async () => {
       const { data, error } = await supabase.rpc("get_order_for_guest", {
-        p_order_id: activeOrder.order_id,
-        p_guest_token: activeOrder.guest_order_token,
+        // ✅ ensure clean UUID strings (fixes uuid=text mismatch issues)
+        p_order_id: String(activeOrder.order_id || "").trim(),
+        p_guest_token: String(activeOrder.guest_order_token || "").trim(),
       });
 
       if (cancelled) return;
@@ -699,7 +700,15 @@ export default function OrderPage() {
           boxShadow: "0 10px 25px rgba(0,0,0,0.04)",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 10,
+            alignItems: "baseline",
+            flexWrap: "wrap",
+          }}
+        >
           <h2 style={{ margin: 0 }}>Cart</h2>
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
