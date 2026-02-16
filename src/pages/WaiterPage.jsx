@@ -4,7 +4,16 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
-const COLUMNS = ["queued", "accepted", "preparing", "ready"];
+const COLUMNS = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
+const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
+
+function withTimeout(promise, ms, message = "Request timed out. Please try again.") {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
 
 function minutesAgo(dateStr) {
   const diffMs = Date.now() - new Date(dateStr).getTime();
@@ -30,6 +39,7 @@ function chipStyle(status) {
   if (status === "accepted") return { ...base, background: "#f5f3ff", borderColor: "#e9d5ff" };
   if (status === "preparing") return { ...base, background: "#fff7ed", borderColor: "#fed7aa" };
   if (status === "ready") return { ...base, background: "#ecfdf5", borderColor: "#bbf7d0" };
+  if (status === "awaiting_payment") return { ...base, background: "#fefce8", borderColor: "#fde68a" };
   return base;
 }
 
@@ -41,10 +51,7 @@ function overdueCardStyle(mins) {
 
 export default function WaiterPage() {
   const nav = useNavigate();
-
-  const [authReady, setAuthReady] = useState(false);
-  const [role, setRole] = useState(null); // "waiter" | "kitchen" | null
-
+  const [session, setSession] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
 
@@ -52,7 +59,10 @@ export default function WaiterPage() {
 
   // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("waiter_sound") === "1");
-  const prevStatusMapRef = useRef(new Map()); // orderId -> lastStatus
+  const prevStatusMapRef = useRef(new Map());
+
+  // actions
+  const [busyOrderId, setBusyOrderId] = useState(null);
 
   // Default compact mode on small screens
   useEffect(() => {
@@ -62,49 +72,51 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
-  // Auth gate + ROLE gate (waiter only) — robust across refresh
+  // Require login + ROLE gate (waiter only)
   useEffect(() => {
     let alive = true;
 
-    async function checkAuthAndRole() {
-      setErr("");
-
+    async function check() {
       const { data } = await supabase.auth.getSession();
-      const session = data.session;
-
+      const s = data.session || null;
       if (!alive) return;
 
-      if (!session) {
-        setAuthReady(true);
-        setRole(null);
-        nav("/login", { replace: true });
+      setSession(s);
+      if (!s) {
+        nav("/login");
         return;
       }
 
-      const { data: r, error: roleErr } = await supabase.rpc("get_my_role");
-      if (!alive) return;
-
+      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
       if (roleErr) {
-        setAuthReady(true);
-        setRole(null);
-        setErr(roleErr.message);
-        nav("/login", { replace: true });
+        nav("/login");
         return;
       }
 
-      const normalized = String(r || "").trim().toLowerCase();
-      setRole(normalized);
-      setAuthReady(true);
-
-      if (normalized !== "waiter") {
+      const r = String(role || "").trim().toLowerCase();
+      if (r !== "waiter") {
         nav("/kitchen", { replace: true });
+        return;
       }
     }
 
-    checkAuthAndRole();
+    check();
 
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      checkAuthAndRole();
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
+      setSession(s);
+      if (!s) {
+        nav("/login");
+        return;
+      }
+
+      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
+      if (roleErr) {
+        nav("/login");
+        return;
+      }
+
+      const r = String(role || "").trim().toLowerCase();
+      if (r !== "waiter") nav("/kitchen", { replace: true });
     });
 
     return () => {
@@ -116,16 +128,15 @@ export default function WaiterPage() {
   async function load() {
     setErr("");
 
-    const { data, error } = await supabase.rpc("staff_list_active_orders", {
-      p_bust: Date.now(),
-    });
+    const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
     if (error) return setErr(error.message);
 
-    // normalize order_items (RPC returns json sometimes)
-    const nextOrders = (data || []).map((o) => ({
-      ...o,
-      order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
-    }));
+    const nextOrders = (data || [])
+      .filter((o) => ACTIVE_STATUSES.includes(String(o.status || "").toLowerCase()))
+      .map((o) => ({
+        ...o,
+        order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
+      }));
 
     // Sound: ding when order transitions to READY
     if (soundOn) {
@@ -143,7 +154,6 @@ export default function WaiterPage() {
         prevMap.set(o.id, now);
       }
     } else {
-      // keep map updated so turning sound on doesn't ding for everything
       const prevMap = prevStatusMapRef.current;
       for (const o of nextOrders) {
         prevMap.set(o.id, String(o.status || "").trim().toLowerCase());
@@ -153,16 +163,13 @@ export default function WaiterPage() {
     setOrders(nextOrders);
   }
 
-  // Poll only when role is confirmed waiter
   useEffect(() => {
-    if (!authReady) return;
-    if (role !== "waiter") return;
-
+    if (!session) return;
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authReady, role, soundOn]);
+  }, [session, soundOn]);
 
   const ordersWithAge = useMemo(() => {
     return (orders || []).map((o) => ({
@@ -174,8 +181,9 @@ export default function WaiterPage() {
   const byStatus = useMemo(() => {
     const map = new Map();
     for (const o of ordersWithAge) {
-      if (!map.has(o.status)) map.set(o.status, []);
-      map.get(o.status).push(o);
+      const st = String(o.status || "").toLowerCase();
+      if (!map.has(st)) map.set(st, []);
+      map.get(st).push(o);
     }
     return map;
   }, [ordersWithAge]);
@@ -183,24 +191,131 @@ export default function WaiterPage() {
   const flatSorted = useMemo(() => {
     const statusRank = new Map(COLUMNS.map((s, i) => [s, i]));
     return [...ordersWithAge].sort((a, b) => {
-      const ra = statusRank.get(a.status) ?? 999;
-      const rb = statusRank.get(b.status) ?? 999;
+      const ra = statusRank.get(String(a.status || "").toLowerCase()) ?? 999;
+      const rb = statusRank.get(String(b.status || "").toLowerCase()) ?? 999;
       if (ra !== rb) return ra - rb;
       return new Date(a.created_at) - new Date(b.created_at);
     });
   }, [ordersWithAge]);
 
-  // Reliable logout (hard redirect)
+  async function setStatus(orderId, newStatus) {
+    if (busyOrderId) return;
+
+    setErr("");
+    setBusyOrderId(orderId);
+
+    const prevOrders = orders;
+
+    if (newStatus === "cancelled" || newStatus === "paid") {
+      setOrders((cur) => cur.filter((o) => o.id !== orderId));
+    } else {
+      setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
+    }
+
+    try {
+      const rpcCall = supabase.rpc("staff_set_status", {
+        p_order_id: orderId,
+        p_new_status: newStatus,
+      });
+
+      const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
+      if (error) {
+        setOrders(prevOrders);
+        setErr(error.message);
+        return;
+      }
+
+      await load();
+    } catch (e) {
+      setOrders(prevOrders);
+      setErr(e?.message || "Something went wrong. Please try again.");
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
   async function logout() {
     setErr("");
     try {
-      await supabase.auth.signOut();
+      const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
+      if (error) {
+        setErr(error.message);
+        return;
+      }
+      nav("/login", { replace: true });
     } catch (e) {
-      console.warn("signOut failed:", e);
-    } finally {
-      window.location.href = "/login";
+      setErr(e?.message || "Logout failed.");
     }
   }
+
+  const ActionRow = ({ o }) => {
+    const st = String(o.status || "").toLowerCase();
+    const busy = busyOrderId === o.id;
+
+    return (
+      <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setStatus(o.id, "cancelled")}
+          style={{
+            padding: "6px 10px",
+            borderRadius: 10,
+            cursor: "pointer",
+            opacity: busy ? 0.6 : 1,
+            border: "1px solid #fecaca",
+            background: "#fff1f2",
+            fontWeight: 900,
+          }}
+        >
+          {busy ? "Working…" : "Cancel"}
+        </button>
+
+        {st === "queued" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "accepted")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Updating…" : "Accept"}
+          </button>
+        )}
+
+        {st === "accepted" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "preparing")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Updating…" : "Start Prep"}
+          </button>
+        )}
+
+        {st === "preparing" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "ready")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Updating…" : "Ready"}
+          </button>
+        )}
+
+        {st === "ready" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "awaiting_payment")} style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Updating…" : "Complete"}
+          </button>
+        )}
+
+        {st === "awaiting_payment" && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setStatus(o.id, "paid")}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 10,
+              cursor: "pointer",
+              opacity: busy ? 0.6 : 1,
+              border: "1px solid #bbf7d0",
+              background: "#ecfdf5",
+              fontWeight: 900,
+            }}
+          >
+            {busy ? "Updating…" : "Paid"}
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 1200, margin: "0 auto" }}>
@@ -290,26 +405,14 @@ export default function WaiterPage() {
         </div>
       )}
 
-      {!authReady ? (
-        <div style={{ marginTop: 14, color: "#666" }}>Loading…</div>
-      ) : role !== "waiter" ? (
-        <div style={{ marginTop: 14, color: "#666" }}>Redirecting…</div>
-      ) : compact ? (
+      {compact ? (
         <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
           {flatSorted.length === 0 ? <div style={{ color: "#777" }}>No active orders</div> : null}
 
           {flatSorted.map((o) => {
             const style = overdueCardStyle(o.mins);
             return (
-              <div
-                key={o.id}
-                style={{
-                  border: `1px solid ${style.borderColor}`,
-                  background: style.background,
-                  borderRadius: 14,
-                  padding: 12,
-                }}
-              >
+              <div key={o.id} style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                   <div>
                     <div style={{ fontWeight: 900, fontSize: 16 }}>
@@ -319,7 +422,7 @@ export default function WaiterPage() {
                   </div>
 
                   <div style={{ textAlign: "right" }}>
-                    <div style={chipStyle(o.status)}>{statusLabel(o.status)}</div>
+                    <div style={chipStyle(String(o.status || "").toLowerCase())}>{statusLabel(o.status)}</div>
                     <div style={{ color: "#666", fontSize: 12, marginTop: 6 }}>{o.mins} min ago</div>
                   </div>
                 </div>
@@ -332,25 +435,18 @@ export default function WaiterPage() {
                     </div>
                   ))}
                 </div>
+
+                <ActionRow o={o} />
               </div>
             );
           })}
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginTop: 16 }}>
           {COLUMNS.map((st) => (
-            <div
-              key={st}
-              style={{
-                border: "1px solid #eee",
-                borderRadius: 14,
-                padding: 12,
-                background: "#fafafa",
-                minHeight: 260,
-              }}
-            >
+            <div key={st} style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fafafa", minHeight: 260 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <h2 style={{ margin: 0, textTransform: "capitalize" }}>{st}</h2>
+                <h2 style={{ margin: 0, textTransform: "capitalize" }}>{st.replace("_", " ")}</h2>
                 <div style={{ color: "#666", fontSize: 12 }}>{(byStatus.get(st) || []).length}</div>
               </div>
 
@@ -360,15 +456,7 @@ export default function WaiterPage() {
                 {(byStatus.get(st) || []).map((o) => {
                   const style = overdueCardStyle(o.mins);
                   return (
-                    <div
-                      key={o.id}
-                      style={{
-                        border: `1px solid ${style.borderColor}`,
-                        background: style.background,
-                        borderRadius: 14,
-                        padding: 10,
-                      }}
-                    >
+                    <div key={o.id} style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 10 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                         <div>
                           <div style={{ fontWeight: 900 }}>
@@ -387,6 +475,8 @@ export default function WaiterPage() {
                           </div>
                         ))}
                       </div>
+
+                      <ActionRow o={o} />
                     </div>
                   );
                 })}
