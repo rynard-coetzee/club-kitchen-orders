@@ -16,13 +16,12 @@ function withTimeout(promise, ms, message = "Request timed out. Please try again
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
-// ✅ Added awaiting_payment
 const COLUMNS = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 
 export default function KitchenPage() {
   const nav = useNavigate();
-  const [session, setSession] = useState(null);
+
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
   const [busyOrderId, setBusyOrderId] = useState(null);
@@ -31,60 +30,62 @@ export default function KitchenPage() {
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("kitchen_sound") === "1");
   const seenQueuedRef = useRef(new Set());
 
-  // Auth gate + ROLE gate (kitchen only)
-  useEffect(() => {
-    let alive = true;
+  // prevent double-intervals + avoid setState after unmount
+  const pollRef = useRef(null);
+  const aliveRef = useRef(true);
 
-    async function check() {
-      const { data } = await supabase.auth.getSession();
-      const s = data.session || null;
-      if (!alive) return;
+  async function ensureSession() {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) return data.session;
 
-      setSession(s);
-      if (!s) {
-        nav("/login");
-        return;
-      }
+    // try refresh once
+    const refreshed = await supabase.auth.refreshSession();
+    return refreshed?.data?.session || null;
+  }
 
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (roleErr) {
-        nav("/login");
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "kitchen") nav("/waiter", { replace: true });
-    }
-
-    check();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
-      setSession(s);
-      if (!s) {
-        nav("/login");
-        return;
-      }
-
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (roleErr) {
-        nav("/login");
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "kitchen") nav("/waiter", { replace: true });
-    });
-
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
-  }, [nav]);
+  async function ensureKitchenRole() {
+    const { data: role, error } = await supabase.rpc("get_my_role");
+    if (error) return { ok: false, reason: "role_error" };
+    const r = String(role || "").trim().toLowerCase();
+    if (r !== "kitchen") return { ok: false, reason: "not_kitchen", role: r };
+    return { ok: true, role: r };
+  }
 
   async function load() {
     setErr("");
+
+    // 1) ensure session
+    const s = await ensureSession();
+    if (!aliveRef.current) return;
+
+    if (!s) {
+      stopPolling();
+      nav("/login", { replace: true });
+      return;
+    }
+
+    // 2) ensure role
+    const roleRes = await ensureKitchenRole();
+    if (!aliveRef.current) return;
+
+    if (!roleRes.ok) {
+      stopPolling();
+      if (roleRes.reason === "not_kitchen") {
+        nav("/waiter", { replace: true });
+      } else {
+        nav("/login", { replace: true });
+      }
+      return;
+    }
+
+    // 3) fetch active orders (cache-bust param)
     const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
-    if (error) return setErr(error.message);
+    if (!aliveRef.current) return;
+
+    if (error) {
+      setErr(error.message);
+      return;
+    }
 
     const nextOrders = (data || [])
       .filter((o) => ACTIVE_STATUSES.includes(String(o.status || "").toLowerCase()))
@@ -98,15 +99,18 @@ export default function KitchenPage() {
       const seen = seenQueuedRef.current;
 
       for (const o of nextOrders) {
-        if (String(o.status).toLowerCase() === "queued" && !seen.has(o.id)) {
+        if (String(o.status || "").toLowerCase() === "queued" && !seen.has(o.id)) {
           initSound();
           ding();
           seen.add(o.id);
         }
       }
 
+      // Cleanup: remove ids that are no longer queued
       for (const id of Array.from(seen)) {
-        const stillQueued = nextOrders.some((o) => o.id === id && String(o.status).toLowerCase() === "queued");
+        const stillQueued = nextOrders.some(
+          (o) => o.id === id && String(o.status || "").toLowerCase() === "queued"
+        );
         if (!stillQueued) seen.delete(id);
       }
     }
@@ -114,13 +118,29 @@ export default function KitchenPage() {
     setOrders(nextOrders);
   }
 
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  // ✅ Start polling immediately on mount and keep it alive across refreshes
   useEffect(() => {
-    if (!session) return;
+    aliveRef.current = true;
+
     load();
-    const t = setInterval(load, 2500);
-    return () => clearInterval(t);
+
+    if (!pollRef.current) {
+      pollRef.current = setInterval(load, 2500);
+    }
+
+    return () => {
+      aliveRef.current = false;
+      stopPolling();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, soundOn]);
+  }, [soundOn]);
 
   const grouped = useMemo(() => {
     const map = new Map();
@@ -140,7 +160,7 @@ export default function KitchenPage() {
 
     const prevOrders = orders;
 
-    // ✅ If cancelling or paying, remove immediately
+    // optimistic UI
     if (newStatus === "cancelled" || newStatus === "paid") {
       setOrders((cur) => cur.filter((o) => o.id !== orderId));
     } else {
@@ -148,12 +168,13 @@ export default function KitchenPage() {
     }
 
     try {
-      const rpcCall = supabase.rpc("staff_set_status", {
+      const rpcCall = supabase.rpc("kitchen_set_status", {
         p_order_id: orderId,
         p_new_status: newStatus,
       });
 
       const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
+
       if (error) {
         setOrders(prevOrders);
         setErr(error.message);
@@ -172,6 +193,7 @@ export default function KitchenPage() {
   async function logout() {
     setErr("");
     try {
+      stopPolling();
       const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
       if (error) {
         setErr(error.message);
@@ -183,71 +205,51 @@ export default function KitchenPage() {
     }
   }
 
-  const ActionRow = ({ o }) => {
+  function ActionRow({ o }) {
     const st = String(o.status || "").toLowerCase();
     const busy = busyOrderId === o.id;
 
+    const btnBase = {
+      padding: "6px 10px",
+      borderRadius: 10,
+      cursor: "pointer",
+      opacity: busy ? 0.6 : 1,
+      border: "1px solid #ddd",
+      background: "white",
+      fontWeight: 900,
+    };
+
     return (
       <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-        {/* ✅ Cancel always available while active */}
         <button
           type="button"
           disabled={busy}
           onClick={() => setStatus(o.id, "cancelled")}
-          style={{
-            padding: "6px 10px",
-            borderRadius: 10,
-            cursor: "pointer",
-            opacity: busy ? 0.6 : 1,
-            border: "1px solid #fecaca",
-            background: "#fff1f2",
-            fontWeight: 900,
-          }}
+          style={{ ...btnBase, border: "1px solid #fecaca", background: "#fff1f2" }}
         >
-          {busy ? "Working…" : "Cancel"}
+          Cancel
         </button>
 
         {st === "queued" && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setStatus(o.id, "accepted")}
-            style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-          >
-            {busy ? "Updating…" : "Accept"}
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "accepted")} style={btnBase}>
+            {busy ? "Accepting…" : "Accept"}
           </button>
         )}
 
         {st === "accepted" && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setStatus(o.id, "preparing")}
-            style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-          >
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "preparing")} style={btnBase}>
             {busy ? "Updating…" : "Start Prep"}
           </button>
         )}
 
         {st === "preparing" && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => setStatus(o.id, "ready")}
-            style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-          >
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "ready")} style={btnBase}>
             {busy ? "Updating…" : "Ready"}
           </button>
         )}
 
         {st === "ready" && (
-          <button
-            type="button"
-            disabled={busy}
-            // ✅ Complete now goes to awaiting_payment
-            onClick={() => setStatus(o.id, "awaiting_payment")}
-            style={{ padding: "6px 10px", borderRadius: 10, cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-          >
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "awaiting_payment")} style={btnBase}>
             {busy ? "Updating…" : "Complete"}
           </button>
         )}
@@ -257,26 +259,26 @@ export default function KitchenPage() {
             type="button"
             disabled={busy}
             onClick={() => setStatus(o.id, "paid")}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 10,
-              cursor: "pointer",
-              opacity: busy ? 0.6 : 1,
-              border: "1px solid #bbf7d0",
-              background: "#ecfdf5",
-              fontWeight: 900,
-            }}
+            style={{ ...btnBase, border: "1px solid #bbf7d0", background: "#ecfdf5" }}
           >
             {busy ? "Updating…" : "Paid"}
           </button>
         )}
       </div>
     );
-  };
+  }
 
   return (
     <div style={{ fontFamily: "Arial", padding: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
         <h1 style={{ margin: 0 }}>Kitchen Queue</h1>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
