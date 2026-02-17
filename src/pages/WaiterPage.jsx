@@ -52,6 +52,49 @@ function overdueCardStyle(mins) {
   return { borderColor: "#e5e5e5", background: "white" };
 }
 
+/** ✅ Extras helpers (UI only) */
+function parseExtraFor(note) {
+  const s = String(note || "").trim();
+  const prefix = "EXTRA FOR:";
+  if (!s.toUpperCase().startsWith(prefix)) return null;
+  return s.slice(prefix.length).trim();
+}
+
+function groupItemsWithExtras(orderItems) {
+  const list = Array.isArray(orderItems) ? orderItems : [];
+  const mains = [];
+  const extras = [];
+
+  for (const it of list) {
+    const parentName = parseExtraFor(it.item_notes);
+    if (parentName) extras.push({ ...it, __parentName: parentName });
+    else mains.push({ ...it, __extras: [] });
+  }
+
+  const byName = new Map();
+  for (const m of mains) {
+    const key = String(m.name || "").trim().toLowerCase();
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(m);
+  }
+
+  const unmatched = [];
+  for (const ex of extras) {
+    const key = String(ex.__parentName || "").trim().toLowerCase();
+    const candidates = byName.get(key);
+    if (!candidates || candidates.length === 0) {
+      unmatched.push(ex);
+      continue;
+    }
+    candidates[0].__extras.push(ex);
+  }
+
+  return [...mains, ...unmatched].map((x) => ({
+    ...x,
+    __extras: Array.isArray(x.__extras) ? x.__extras : [],
+  }));
+}
+
 export default function WaiterPage() {
   const nav = useNavigate();
 
@@ -69,17 +112,14 @@ export default function WaiterPage() {
   const pollRef = useRef(null);
   const aliveRef = useRef(true);
 
-  // ✅ Always be able to rehydrate a session on refresh
   async function ensureSession() {
     const { data } = await supabase.auth.getSession();
     if (data?.session) return data.session;
 
-    // try refresh once
     const refreshed = await supabase.auth.refreshSession();
     return refreshed?.data?.session || null;
   }
 
-  // ✅ Role check helper
   async function ensureWaiterRole() {
     const { data: role, error } = await supabase.rpc("get_my_role");
     if (error) return { ok: false, reason: "role_error" };
@@ -88,7 +128,6 @@ export default function WaiterPage() {
     return { ok: true, role: r };
   }
 
-  // Default compact mode on small screens
   useEffect(() => {
     const decide = () => setCompact(window.innerWidth < 900);
     decide();
@@ -96,22 +135,18 @@ export default function WaiterPage() {
     return () => window.removeEventListener("resize", decide);
   }, []);
 
-  // ✅ Main polling load (self-healing after refresh)
   async function load() {
     setErr("");
 
-    // 1) ensure session
     const s = await ensureSession();
     if (!aliveRef.current) return;
 
     if (!s) {
-      // no session → stop polling and go login
       stopPolling();
       nav("/login", { replace: true });
       return;
     }
 
-    // 2) ensure role
     const roleRes = await ensureWaiterRole();
     if (!aliveRef.current) return;
 
@@ -125,7 +160,6 @@ export default function WaiterPage() {
       return;
     }
 
-    // 3) fetch orders (cache-bust param)
     const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
     if (!aliveRef.current) return;
 
@@ -141,7 +175,6 @@ export default function WaiterPage() {
         order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
       }));
 
-    // Sound: ding when order transitions to READY
     if (soundOn) {
       const prevMap = prevStatusMapRef.current;
 
@@ -169,14 +202,11 @@ export default function WaiterPage() {
     }
   }
 
-  // ✅ Start polling immediately on mount and keep it alive across refreshes
   useEffect(() => {
     aliveRef.current = true;
 
-    // run once immediately
     load();
 
-    // start interval once
     if (!pollRef.current) {
       pollRef.current = setInterval(load, 3000);
     }
@@ -224,7 +254,6 @@ export default function WaiterPage() {
 
     const prevOrders = orders;
 
-    // optimistic UI
     if (newStatus === "cancelled" || newStatus === "paid") {
       setOrders((cur) => cur.filter((o) => o.id !== orderId));
     } else {
@@ -338,6 +367,7 @@ export default function WaiterPage() {
 
   function OrderCard({ o }) {
     const style = overdueCardStyle(o.mins);
+
     return (
       <div style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
@@ -354,13 +384,32 @@ export default function WaiterPage() {
           </div>
         </div>
 
-        <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-          {(o.order_items || []).map((it) => (
-            <div key={it.id} style={{ fontSize: 13 }}>
-              <b>{it.qty}×</b> {it.name}
-              {it.item_notes ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
-            </div>
-          ))}
+        {/* ✅ Group extras under parent items */}
+        <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+          {groupItemsWithExtras(o.order_items || []).map((it) => {
+            const isUnmatchedExtra = Boolean(parseExtraFor(it.item_notes));
+            return (
+              <div key={it.id} style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <div>
+                    <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
+                    {it.item_notes && !isUnmatchedExtra ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
+                    {isUnmatchedExtra ? <div style={{ color: "#6b7280" }}>{it.item_notes}</div> : null}
+                  </div>
+                </div>
+
+                {Array.isArray(it.__extras) && it.__extras.length > 0 ? (
+                  <div style={{ marginLeft: 14, display: "grid", gap: 6 }}>
+                    {it.__extras.map((ex) => (
+                      <div key={ex.id} style={{ fontSize: 13 }}>
+                        <span style={{ opacity: 0.7 }}>↳</span> <b>{ex.qty}×</b> {ex.name}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
 
         <ActionRow o={o} />
