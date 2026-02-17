@@ -16,6 +16,50 @@ function withTimeout(promise, ms, message = "Request timed out. Please try again
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
+/** ✅ Extras helpers (UI only) */
+function parseExtraFor(note) {
+  const s = String(note || "").trim();
+  const prefix = "EXTRA FOR:";
+  if (!s.toUpperCase().startsWith(prefix)) return null;
+  return s.slice(prefix.length).trim();
+}
+
+function groupItemsWithExtras(orderItems) {
+  const list = Array.isArray(orderItems) ? orderItems : [];
+  const mains = [];
+  const extras = [];
+
+  for (const it of list) {
+    const parentName = parseExtraFor(it.item_notes);
+    if (parentName) extras.push({ ...it, __parentName: parentName });
+    else mains.push({ ...it, __extras: [] });
+  }
+
+  const byName = new Map(); // lower name -> [mainItem...]
+  for (const m of mains) {
+    const key = String(m.name || "").trim().toLowerCase();
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(m);
+  }
+
+  const unmatched = [];
+  for (const ex of extras) {
+    const key = String(ex.__parentName || "").trim().toLowerCase();
+    const candidates = byName.get(key);
+    if (!candidates || candidates.length === 0) {
+      unmatched.push(ex);
+      continue;
+    }
+    // attach to first matching main item
+    candidates[0].__extras.push(ex);
+  }
+
+  return [...mains, ...unmatched].map((x) => ({
+    ...x,
+    __extras: Array.isArray(x.__extras) ? x.__extras : [],
+  }));
+}
+
 const COLUMNS = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 
@@ -373,18 +417,46 @@ export default function KitchenPage() {
                     <div style={{ color: "#666", fontSize: 12 }}>{new Date(o.created_at).toLocaleTimeString()}</div>
                   </div>
 
-                  <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                    {(o.order_items || []).map((it) => (
-                      <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div>
-                          <b>{it.qty}×</b> {it.name}
-                          {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
+                  {/* ✅ Group extras under parent items */}
+                  <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                    {groupItemsWithExtras(o.order_items || []).map((it) => {
+                      const isUnmatchedExtra = Boolean(parseExtraFor(it.item_notes));
+                      return (
+                        <div key={it.id} style={{ display: "grid", gap: 6 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div>
+                              <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
+                              {it.item_notes && !isUnmatchedExtra ? (
+                                <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
+                              ) : null}
+                              {/* show note if it’s an unmatched extra so staff still sees parent */}
+                              {isUnmatchedExtra ? (
+                                <div style={{ color: "#6b7280", fontSize: 12 }}>{it.item_notes}</div>
+                              ) : null}
+                            </div>
+
+                            <div style={{ color: "#666", fontSize: 12 }}>
+                              {money((it.unit_price_cents || 0) * (it.qty || 0))}
+                            </div>
+                          </div>
+
+                          {Array.isArray(it.__extras) && it.__extras.length > 0 ? (
+                            <div style={{ marginLeft: 14, display: "grid", gap: 6 }}>
+                              {it.__extras.map((ex) => (
+                                <div key={ex.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                  <div style={{ color: "#111" }}>
+                                    <span style={{ opacity: 0.7 }}>↳</span> <b>{ex.qty}×</b> {ex.name}
+                                  </div>
+                                  <div style={{ color: "#666", fontSize: 12 }}>
+                                    {money((ex.unit_price_cents || 0) * (ex.qty || 0))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
-                        <div style={{ color: "#666", fontSize: 12 }}>
-                          {money((it.unit_price_cents || 0) * (it.qty || 0))}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   <ActionRow o={o} />
