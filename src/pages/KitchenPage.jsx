@@ -16,136 +16,90 @@ function withTimeout(promise, ms, message = "Request timed out. Please try again
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
-// ✅ Parse "EXTRA FOR: <parent name>"
-function parseExtraFor(note) {
-  const s = String(note || "").trim();
-  const prefix = "EXTRA FOR:";
-  if (!s.toUpperCase().startsWith(prefix)) return null;
-  return s.slice(prefix.length).trim();
-}
-
-// ✅ Group extras under their parent item
-function groupItemsWithExtras(orderItems) {
-  const base = Array.isArray(orderItems) ? orderItems : [];
-  const mains = [];
-  const extras = [];
-
-  for (const it of base) {
-    const parentName = parseExtraFor(it.item_notes);
-    if (parentName) extras.push({ ...it, __parentName: parentName });
-    else mains.push({ ...it, __extras: [] });
-  }
-
-  // Map by lowercased name for matching
-  const byName = new Map();
-  for (const m of mains) {
-    const key = String(m.name || "").trim().toLowerCase();
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(m);
-  }
-
-  const unmatchedExtras = [];
-
-  for (const ex of extras) {
-    const key = String(ex.__parentName || "").trim().toLowerCase();
-    const candidates = byName.get(key);
-    if (!candidates || candidates.length === 0) {
-      unmatchedExtras.push(ex);
-      continue;
-    }
-
-    // Attach to the first match (good enough for now)
-    candidates[0].__extras.push(ex);
-  }
-
-  // Keep unmatched extras as standalone rows (so nothing disappears)
-  return [...mains, ...unmatchedExtras].map((x) => ({
-    ...x,
-    __extras: Array.isArray(x.__extras) ? x.__extras : [],
-  }));
-}
+const COLUMNS = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
+const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 
 export default function KitchenPage() {
   const nav = useNavigate();
-  const [session, setSession] = useState(null);
+
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
   const [busyOrderId, setBusyOrderId] = useState(null);
-
-  const columns = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 
   // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("kitchen_sound") === "1");
   const seenQueuedRef = useRef(new Set());
 
-  // Auth gate + ROLE gate (kitchen only)
-  useEffect(() => {
-    let alive = true;
+  // prevent double-intervals + avoid setState after unmount
+  const pollRef = useRef(null);
+  const aliveRef = useRef(true);
 
-    async function check() {
-      const { data } = await supabase.auth.getSession();
-      const s = data.session || null;
-      if (!alive) return;
+  async function ensureSession() {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) return data.session;
 
-      setSession(s);
-      if (!s) {
-        nav("/login");
-        return;
-      }
+    // try refresh once
+    const refreshed = await supabase.auth.refreshSession();
+    return refreshed?.data?.session || null;
+  }
 
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (roleErr) {
-        nav("/login");
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "kitchen") {
-        nav("/waiter", { replace: true });
-      }
-    }
-
-    check();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, s) => {
-      setSession(s);
-      if (!s) {
-        nav("/login");
-        return;
-      }
-
-      const { data: role, error: roleErr } = await supabase.rpc("get_my_role");
-      if (roleErr) {
-        nav("/login");
-        return;
-      }
-
-      const r = String(role || "").trim().toLowerCase();
-      if (r !== "kitchen") nav("/waiter", { replace: true });
-    });
-
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
-  }, [nav]);
+  async function ensureKitchenRole() {
+    const { data: role, error } = await supabase.rpc("get_my_role");
+    if (error) return { ok: false, reason: "role_error" };
+    const r = String(role || "").trim().toLowerCase();
+    if (r !== "kitchen") return { ok: false, reason: "not_kitchen", role: r };
+    return { ok: true, role: r };
+  }
 
   async function load() {
     setErr("");
-    const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
-    if (error) return setErr(error.message);
 
-    const nextOrders = (data || []).map((o) => ({
-      ...o,
-      order_items: groupItemsWithExtras(Array.isArray(o.order_items) ? o.order_items : o.order_items || []),
-    }));
+    // 1) ensure session
+    const s = await ensureSession();
+    if (!aliveRef.current) return;
+
+    if (!s) {
+      stopPolling();
+      nav("/login", { replace: true });
+      return;
+    }
+
+    // 2) ensure role
+    const roleRes = await ensureKitchenRole();
+    if (!aliveRef.current) return;
+
+    if (!roleRes.ok) {
+      stopPolling();
+      if (roleRes.reason === "not_kitchen") {
+        nav("/waiter", { replace: true });
+      } else {
+        nav("/login", { replace: true });
+      }
+      return;
+    }
+
+    // 3) fetch active orders (cache-bust param)
+    const { data, error } = await supabase.rpc("staff_list_active_orders", { p_bust: Date.now() });
+    if (!aliveRef.current) return;
+
+    if (error) {
+      setErr(error.message);
+      return;
+    }
+
+    const nextOrders = (data || [])
+      .filter((o) => ACTIVE_STATUSES.includes(String(o.status || "").toLowerCase()))
+      .map((o) => ({
+        ...o,
+        order_items: Array.isArray(o.order_items) ? o.order_items : o.order_items || [],
+      }));
 
     // Ding for NEW queued orders only
     if (soundOn) {
       const seen = seenQueuedRef.current;
 
       for (const o of nextOrders) {
-        if (o.status === "queued" && !seen.has(o.id)) {
+        if (String(o.status || "").toLowerCase() === "queued" && !seen.has(o.id)) {
           initSound();
           ding();
           seen.add(o.id);
@@ -154,7 +108,9 @@ export default function KitchenPage() {
 
       // Cleanup: remove ids that are no longer queued
       for (const id of Array.from(seen)) {
-        const stillQueued = nextOrders.some((o) => o.id === id && o.status === "queued");
+        const stillQueued = nextOrders.some(
+          (o) => o.id === id && String(o.status || "").toLowerCase() === "queued"
+        );
         if (!stillQueued) seen.delete(id);
       }
     }
@@ -162,20 +118,36 @@ export default function KitchenPage() {
     setOrders(nextOrders);
   }
 
-  // Poll for updates
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  // ✅ Start polling immediately on mount and keep it alive across refreshes
   useEffect(() => {
-    if (!session) return;
+    aliveRef.current = true;
+
     load();
-    const t = setInterval(load, 2500);
-    return () => clearInterval(t);
+
+    if (!pollRef.current) {
+      pollRef.current = setInterval(load, 2500);
+    }
+
+    return () => {
+      aliveRef.current = false;
+      stopPolling();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, soundOn]);
+  }, [soundOn]);
 
   const grouped = useMemo(() => {
     const map = new Map();
     for (const o of orders) {
-      if (!map.has(o.status)) map.set(o.status, []);
-      map.get(o.status).push(o);
+      const st = String(o.status || "").toLowerCase();
+      if (!map.has(st)) map.set(st, []);
+      map.get(st).push(o);
     }
     return map;
   }, [orders]);
@@ -186,12 +158,17 @@ export default function KitchenPage() {
     setErr("");
     setBusyOrderId(orderId);
 
-    // optimistic update
     const prevOrders = orders;
-    setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
+
+    // optimistic UI
+    if (newStatus === "cancelled" || newStatus === "paid") {
+      setOrders((cur) => cur.filter((o) => o.id !== orderId));
+    } else {
+      setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
+    }
 
     try {
-      const rpcCall = supabase.rpc("staff_set_status", {
+      const rpcCall = supabase.rpc("kitchen_set_status", {
         p_order_id: orderId,
         p_new_status: newStatus,
       });
@@ -213,50 +190,82 @@ export default function KitchenPage() {
     }
   }
 
-  async function cancelOrder(orderId) {
-    if (busyOrderId) return;
-    setErr("");
-    setBusyOrderId(orderId);
-
-    // remove instantly from UI
-    const prev = orders;
-    setOrders((cur) => cur.filter((o) => o.id !== orderId));
-
-    try {
-      const rpcCall = supabase.rpc("staff_cancel_order", { p_order_id: orderId });
-      const { error } = await withTimeout(rpcCall, 8000, "Network timeout. Please try again.");
-      if (error) {
-        setOrders(prev);
-        setErr(error.message);
-        return;
-      }
-      await load();
-    } catch (e) {
-      setOrders(prev);
-      setErr(e?.message || "Cancel failed.");
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
   async function logout() {
     setErr("");
     try {
+      stopPolling();
       const { error } = await withTimeout(supabase.auth.signOut(), 8000, "Logout timed out. Try again.");
-      if (error) setErr(error.message);
+      if (error) {
+        setErr(error.message);
+        return;
+      }
       nav("/login", { replace: true });
     } catch (e) {
       setErr(e?.message || "Logout failed.");
     }
   }
 
-  function nextActionForStatus(st) {
-    if (st === "queued") return { label: "Accept", to: "accepted" };
-    if (st === "accepted") return { label: "Start Prep", to: "preparing" };
-    if (st === "preparing") return { label: "Ready", to: "ready" };
-    if (st === "ready") return { label: "Complete", to: "awaiting_payment" };
-    if (st === "awaiting_payment") return { label: "Paid", to: "paid" };
-    return null;
+  function ActionRow({ o }) {
+    const st = String(o.status || "").toLowerCase();
+    const busy = busyOrderId === o.id;
+
+    const btnBase = {
+      padding: "6px 10px",
+      borderRadius: 10,
+      cursor: "pointer",
+      opacity: busy ? 0.6 : 1,
+      border: "1px solid #ddd",
+      background: "white",
+      fontWeight: 900,
+    };
+
+    return (
+      <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setStatus(o.id, "cancelled")}
+          style={{ ...btnBase, border: "1px solid #fecaca", background: "#fff1f2" }}
+        >
+          Cancel
+        </button>
+
+        {st === "queued" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "accepted")} style={btnBase}>
+            {busy ? "Accepting…" : "Accept"}
+          </button>
+        )}
+
+        {st === "accepted" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "preparing")} style={btnBase}>
+            {busy ? "Updating…" : "Start Prep"}
+          </button>
+        )}
+
+        {st === "preparing" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "ready")} style={btnBase}>
+            {busy ? "Updating…" : "Ready"}
+          </button>
+        )}
+
+        {st === "ready" && (
+          <button type="button" disabled={busy} onClick={() => setStatus(o.id, "awaiting_payment")} style={btnBase}>
+            {busy ? "Updating…" : "Complete"}
+          </button>
+        )}
+
+        {st === "awaiting_payment" && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setStatus(o.id, "paid")}
+            style={{ ...btnBase, border: "1px solid #bbf7d0", background: "#ecfdf5" }}
+          >
+            {busy ? "Updating…" : "Paid"}
+          </button>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -337,7 +346,7 @@ export default function KitchenPage() {
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginTop: 16 }}>
-        {columns.map((st) => (
+        {COLUMNS.map((st) => (
           <div
             key={st}
             style={{
@@ -348,94 +357,39 @@ export default function KitchenPage() {
               background: "white",
             }}
           >
-            <h2 style={{ marginTop: 0, textTransform: "capitalize" }}>{st.replaceAll("_", " ")}</h2>
+            <h2 style={{ marginTop: 0, textTransform: "capitalize" }}>{st.replace("_", " ")}</h2>
 
             <div style={{ display: "grid", gap: 10 }}>
-              {(grouped.get(st) || []).map((o) => {
-                const action = nextActionForStatus(st);
-                return (
-                  <div key={o.id} style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 10 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div>
-                        <div style={{ fontWeight: 900 }}>
-                          #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"}
-                        </div>
-                        <div style={{ color: "#666" }}>{o.customer_name}</div>
+              {(grouped.get(st) || []).map((o) => (
+                <div key={o.id} style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div>
+                      <div style={{ fontWeight: 900 }}>
+                        #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"}
                       </div>
-
-                      <div style={{ color: "#666", fontSize: 12 }}>{new Date(o.created_at).toLocaleTimeString()}</div>
+                      <div style={{ color: "#666" }}>{o.customer_name}</div>
                     </div>
 
-                    <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                      {(o.order_items || []).map((it) => (
-                        <div key={it.id} style={{ display: "grid", gap: 6 }}>
-                          {/* main line */}
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                            <div>
-                              <b>{it.qty}×</b> {it.name}
-                              {it.item_notes && !parseExtraFor(it.item_notes) ? (
-                                <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
-                              ) : null}
-                            </div>
-                            <div style={{ color: "#666", fontSize: 12 }}>{money((it.unit_price_cents || 0) * (it.qty || 0))}</div>
-                          </div>
-
-                          {/* extras nested */}
-                          {Array.isArray(it.__extras) && it.__extras.length > 0 && (
-                            <div style={{ marginLeft: 14, display: "grid", gap: 6 }}>
-                              {it.__extras.map((ex) => (
-                                <div key={ex.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                                  <div style={{ color: "#111" }}>
-                                    <span style={{ opacity: 0.7 }}>↳</span> <b>{ex.qty}×</b> {ex.name}
-                                  </div>
-                                  <div style={{ color: "#666", fontSize: 12 }}>
-                                    {money((ex.unit_price_cents || 0) * (ex.qty || 0))}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                      {action && (
-                        <button
-                          type="button"
-                          disabled={busyOrderId === o.id}
-                          onClick={() => setStatus(o.id, action.to)}
-                          style={{
-                            padding: "6px 10px",
-                            borderRadius: 10,
-                            cursor: "pointer",
-                            opacity: busyOrderId === o.id ? 0.6 : 1,
-                          }}
-                        >
-                          {busyOrderId === o.id ? "Updating…" : action.label}
-                        </button>
-                      )}
-
-                      <button
-                        type="button"
-                        disabled={busyOrderId === o.id}
-                        onClick={() => cancelOrder(o.id)}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 10,
-                          cursor: "pointer",
-                          background: "#fff1f2",
-                          border: "1px solid #fecaca",
-                          fontWeight: 900,
-                          opacity: busyOrderId === o.id ? 0.6 : 1,
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
+                    <div style={{ color: "#666", fontSize: 12 }}>{new Date(o.created_at).toLocaleTimeString()}</div>
                   </div>
-                );
-              })}
+
+                  <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
+                    {(o.order_items || []).map((it) => (
+                      <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div>
+                          <b>{it.qty}×</b> {it.name}
+                          {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
+                        </div>
+                        <div style={{ color: "#666", fontSize: 12 }}>
+                          {money((it.unit_price_cents || 0) * (it.qty || 0))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <ActionRow o={o} />
+                </div>
+              ))}
 
               {(grouped.get(st) || []).length === 0 ? <div style={{ color: "#777" }}>No orders</div> : null}
             </div>
