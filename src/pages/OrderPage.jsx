@@ -57,7 +57,11 @@ function readyBannerStyle() {
   };
 }
 
-const EXTRAS_CATEGORY = "Extras";
+// ✅ case-insensitive Extras category
+const EXTRAS_CATEGORY_LOWER = "extras";
+function catLower(v) {
+  return String(v || "").trim().toLowerCase();
+}
 
 export default function OrderPage() {
   const nav = useNavigate();
@@ -97,7 +101,12 @@ export default function OrderPage() {
   // Staff role (only staff sees Back button)
   const [staffRole, setStaffRole] = useState(null); // "kitchen" | "waiter" | null
 
-  // ✅ Extras modal state
+  // ✅ “Add extras?” modal after choosing a main item
+  const [extrasPickerOpen, setExtrasPickerOpen] = useState(false);
+  const [extrasPickerParentIdx, setExtrasPickerParentIdx] = useState(null); // cart line index
+  const lastAddedParentIdxRef = useRef(null);
+
+  // ✅ Existing modal when user taps an extra directly
   const [extrasModalOpen, setExtrasModalOpen] = useState(false);
   const [pendingExtra, setPendingExtra] = useState(null); // {id,name,price_cents}
   const [extraTargetIdx, setExtraTargetIdx] = useState(null); // selected cart line index
@@ -119,6 +128,10 @@ export default function OrderPage() {
       .filter(([, list]) => list.length > 0);
   }, [grouped, search]);
 
+  const extrasItems = useMemo(() => {
+    return (menu || []).filter((it) => catLower(it.category) === EXTRAS_CATEGORY_LOWER);
+  }, [menu]);
+
   const cartTotal = useMemo(() => {
     let total = 0;
     for (const line of cart) {
@@ -135,7 +148,7 @@ export default function OrderPage() {
   }
 
   function isExtrasItem(item) {
-    return String(item?.category || "").trim() === EXTRAS_CATEGORY;
+    return catLower(item?.category) === EXTRAS_CATEGORY_LOWER;
   }
 
   async function loadMenu() {
@@ -156,13 +169,11 @@ export default function OrderPage() {
     setMenu(data || []);
   }
 
-  // Load menu
   useEffect(() => {
     loadMenu();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load last order from localStorage (so patron can refresh and still track it)
   useEffect(() => {
     const raw = localStorage.getItem("club_last_order");
     if (raw) {
@@ -175,7 +186,6 @@ export default function OrderPage() {
     }
   }, []);
 
-  // Staff role detection for Back button
   useEffect(() => {
     let alive = true;
 
@@ -222,7 +232,6 @@ export default function OrderPage() {
 
     const fetchStatus = async () => {
       const { data, error } = await supabase.rpc("get_order_for_guest", {
-        // ✅ ensure clean UUID strings (fixes uuid=text mismatch issues)
         p_order_id: String(activeOrder.order_id || "").trim(),
         p_guest_token: String(activeOrder.guest_order_token || "").trim(),
       });
@@ -278,6 +287,43 @@ export default function OrderPage() {
     }
   }, [status, soundOn, orderId]);
 
+  function addExtraToParent(parentIdx, extraItem) {
+    setCart((prev) => {
+      const next = prev.map(ensureLineExtras);
+      if (parentIdx == null || parentIdx < 0 || parentIdx >= next.length) return next;
+
+      const parent = next[parentIdx];
+      const extras = [...(parent.extras || [])];
+
+      const exIdx = extras.findIndex((e) => e.menu_item_id === extraItem.id);
+      if (exIdx >= 0) {
+        extras[exIdx] = { ...extras[exIdx], qty: extras[exIdx].qty + 1 };
+      } else {
+        extras.push({
+          menu_item_id: extraItem.id,
+          name: extraItem.name,
+          price_cents: extraItem.price_cents,
+          qty: 1,
+        });
+      }
+
+      next[parentIdx] = { ...parent, extras };
+      return next;
+    });
+  }
+
+  function openExtrasPickerForParent(parentIdx) {
+    // only open if there are extras in menu
+    if (!extrasItems.length) return;
+    setExtrasPickerParentIdx(parentIdx);
+    setExtrasPickerOpen(true);
+  }
+
+  function closeExtrasPicker() {
+    setExtrasPickerOpen(false);
+    setExtrasPickerParentIdx(null);
+  }
+
   function addMainToCart(item) {
     setCart((prev) => {
       const next = prev.map(ensureLineExtras);
@@ -285,8 +331,11 @@ export default function OrderPage() {
       if (idx >= 0) {
         const copy = [...next];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
+        lastAddedParentIdxRef.current = idx;
         return copy;
       }
+      const newIdx = next.length;
+      lastAddedParentIdxRef.current = newIdx;
       return [
         ...next,
         {
@@ -298,6 +347,12 @@ export default function OrderPage() {
           extras: [],
         },
       ];
+    });
+
+    // ✅ after adding main item, offer extras
+    queueMicrotask(() => {
+      const idx = lastAddedParentIdxRef.current;
+      if (typeof idx === "number") openExtrasPickerForParent(idx);
     });
   }
 
@@ -333,27 +388,7 @@ export default function OrderPage() {
       return;
     }
 
-    setCart((prev) => {
-      const next = prev.map(ensureLineExtras);
-      const parent = next[idx];
-      const extras = [...(parent.extras || [])];
-
-      const exIdx = extras.findIndex((e) => e.menu_item_id === pendingExtra.id);
-      if (exIdx >= 0) {
-        extras[exIdx] = { ...extras[exIdx], qty: extras[exIdx].qty + 1 };
-      } else {
-        extras.push({
-          menu_item_id: pendingExtra.id,
-          name: pendingExtra.name,
-          price_cents: pendingExtra.price_cents,
-          qty: 1,
-        });
-      }
-
-      next[idx] = { ...parent, extras };
-      return next;
-    });
-
+    addExtraToParent(idx, { id: pendingExtra.id, name: pendingExtra.name, price_cents: pendingExtra.price_cents });
     closeExtrasModal();
   }
 
@@ -441,6 +476,7 @@ export default function OrderPage() {
 
     setIsPlacing(true);
     const { data, error } = await supabase.rpc("place_order", {
+      // this will work once you drop the text overload
       p_order_type: orderType,
       p_customer_name: name.trim(),
       p_items: payloadItems,
@@ -514,9 +550,7 @@ export default function OrderPage() {
         >
           <div>
             <h2 style={{ margin: 0 }}>Menu</h2>
-            <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>
-              Tap an item to add it to your cart.
-            </div>
+            <div style={{ color: "#666", marginTop: 4, fontSize: 13 }}>Tap an item to add it to your cart.</div>
           </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -563,15 +597,13 @@ export default function OrderPage() {
 
         <div style={{ marginTop: 12 }}>
           {isMenuLoading ? <div style={{ color: "#666" }}>Loading menu…</div> : null}
-          {!isMenuLoading && !err && menu.length === 0 ? (
-            <div style={{ color: "#777" }}>Menu is empty.</div>
-          ) : null}
+          {!isMenuLoading && !err && menu.length === 0 ? <div style={{ color: "#777" }}>Menu is empty.</div> : null}
         </div>
 
         <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
           {filteredGrouped.map(([cat, list]) => {
             const expanded = expandedCats[cat] ?? true;
-            const isExtras = cat === EXTRAS_CATEGORY;
+            const isExtras = catLower(cat) === EXTRAS_CATEGORY_LOWER;
 
             return (
               <div key={cat} style={{ borderTop: "1px solid #f1f1f1", paddingTop: 10 }}>
@@ -594,9 +626,7 @@ export default function OrderPage() {
                   <h3 style={{ margin: 0 }}>
                     {cat}{" "}
                     {isExtras ? (
-                      <span style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>
-                        (choose which item it’s for)
-                      </span>
+                      <span style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>(extras)</span>
                     ) : null}
                   </h3>
                   <span style={{ color: "#666", fontSize: 12 }}>
@@ -621,40 +651,17 @@ export default function OrderPage() {
                           boxShadow: "0 6px 14px rgba(0,0,0,0.04)",
                         }}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 12,
-                            alignItems: "flex-start",
-                          }}
-                        >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
                           <div>
                             <div style={{ fontWeight: 900 }}>{it.name}</div>
-                            {it.description ? (
-                              <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div>
-                            ) : null}
+                            {it.description ? <div style={{ color: "#666", fontSize: 13 }}>{it.description}</div> : null}
                           </div>
 
                           <div style={{ fontWeight: 900 }}>{money(it.price_cents)}</div>
                         </div>
 
-                        <div
-                          style={{
-                            marginTop: 8,
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: 10,
-                          }}
-                        >
-                          <div
-                            style={{
-                              color: isExtras ? "#7c3aed" : "#2563eb",
-                              fontSize: 12,
-                              fontWeight: 800,
-                            }}
-                          >
+                        <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                          <div style={{ color: isExtras ? "#7c3aed" : "#2563eb", fontSize: 12, fontWeight: 800 }}>
                             {isExtras ? "Tap to attach extra" : "Tap to add"}
                           </div>
                           <div
@@ -700,15 +707,7 @@ export default function OrderPage() {
           boxShadow: "0 10px 25px rgba(0,0,0,0.04)",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 10,
-            alignItems: "baseline",
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
           <h2 style={{ margin: 0 }}>Cart</h2>
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -745,15 +744,7 @@ export default function OrderPage() {
         ) : (
           <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
             {cart.map((x, i) => (
-              <div
-                key={`${x.menu_item_id}-${i}`}
-                style={{
-                  border: "1px solid #f0f0f0",
-                  borderRadius: 14,
-                  padding: 10,
-                  background: "#fafafa",
-                }}
-              >
+              <div key={`${x.menu_item_id}-${i}`} style={{ border: "1px solid #f0f0f0", borderRadius: 14, padding: 10, background: "#fafafa" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                   <div style={{ fontWeight: 900 }}>{x.name}</div>
                   <div style={{ fontWeight: 900 }}>{money(x.price_cents * x.qty)}</div>
@@ -764,14 +755,7 @@ export default function OrderPage() {
                     <button
                       type="button"
                       onClick={() => decLine(i)}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 12,
-                        border: "1px solid #ddd",
-                        background: "white",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                      }}
+                      style={{ padding: "6px 10px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer", fontWeight: 900 }}
                       aria-label="decrease"
                     >
                       −
@@ -780,14 +764,7 @@ export default function OrderPage() {
                     <button
                       type="button"
                       onClick={() => incLine(i)}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: 12,
-                        border: "1px solid #ddd",
-                        background: "white",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                      }}
+                      style={{ padding: "6px 10px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer", fontWeight: 900 }}
                       aria-label="increase"
                     >
                       +
@@ -800,17 +777,9 @@ export default function OrderPage() {
                   value={x.item_notes}
                   onChange={(e) => setNote(i, e.target.value)}
                   placeholder="Notes (optional) e.g. no onion"
-                  style={{
-                    marginTop: 8,
-                    width: "100%",
-                    padding: 10,
-                    borderRadius: 12,
-                    border: "1px solid #ddd",
-                    background: "white",
-                  }}
+                  style={{ marginTop: 8, width: "100%", padding: 10, borderRadius: 12, border: "1px solid #ddd", background: "white" }}
                 />
 
-                {/* ✅ Extras nested under parent item */}
                 {Array.isArray(x.extras) && x.extras.length > 0 && (
                   <div style={{ marginTop: 10, borderTop: "1px dashed #ddd", paddingTop: 10 }}>
                     <div style={{ fontWeight: 900, fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
@@ -819,15 +788,7 @@ export default function OrderPage() {
 
                     <div style={{ display: "grid", gap: 8 }}>
                       {x.extras.map((ex, exIdx) => (
-                        <div
-                          key={`${ex.menu_item_id}-${exIdx}`}
-                          style={{
-                            background: "white",
-                            border: "1px solid #eee",
-                            borderRadius: 12,
-                            padding: 10,
-                          }}
-                        >
+                        <div key={`${ex.menu_item_id}-${exIdx}`} style={{ background: "white", border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                             <div style={{ fontWeight: 900 }}>{ex.name}</div>
                             <div style={{ fontWeight: 900 }}>{money(ex.price_cents * ex.qty)}</div>
@@ -838,14 +799,7 @@ export default function OrderPage() {
                               <button
                                 type="button"
                                 onClick={() => decExtra(i, exIdx)}
-                                style={{
-                                  padding: "6px 10px",
-                                  borderRadius: 12,
-                                  border: "1px solid #ddd",
-                                  background: "white",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                }}
+                                style={{ padding: "6px 10px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer", fontWeight: 900 }}
                                 aria-label="decrease extra"
                               >
                                 −
@@ -854,14 +808,7 @@ export default function OrderPage() {
                               <button
                                 type="button"
                                 onClick={() => incExtra(i, exIdx)}
-                                style={{
-                                  padding: "6px 10px",
-                                  borderRadius: 12,
-                                  border: "1px solid #ddd",
-                                  background: "white",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                }}
+                                style={{ padding: "6px 10px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer", fontWeight: 900 }}
                                 aria-label="increase extra"
                               >
                                 +
@@ -913,16 +860,7 @@ export default function OrderPage() {
             <button
               type="button"
               onClick={startNewOrder}
-              style={{
-                width: "100%",
-                marginTop: 10,
-                padding: 10,
-                borderRadius: 14,
-                border: "1px solid #ddd",
-                background: "white",
-                fontWeight: 900,
-                cursor: "pointer",
-              }}
+              style={{ width: "100%", marginTop: 10, padding: 10, borderRadius: 14, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
             >
               Start a new order
             </button>
@@ -971,7 +909,6 @@ export default function OrderPage() {
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-          {/* Staff-only Back button */}
           {staffRole && (
             <button
               type="button"
@@ -990,24 +927,11 @@ export default function OrderPage() {
             </button>
           )}
 
-          <div
-            style={{
-              ...statusPillStyle(status),
-              ...(isReady ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" } : {}),
-            }}
-          >
+          <div style={{ ...statusPillStyle(status), ...(isReady ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" } : {}) }}>
             {status ? `STATUS: ${normalizeStatus(status)}` : "STATUS: —"}
           </div>
 
-          <div
-            style={{
-              padding: "10px 12px",
-              borderRadius: 14,
-              background: "rgba(255,255,255,0.08)",
-              border: "1px solid rgba(255,255,255,0.12)",
-              fontWeight: 800,
-            }}
-          >
+          <div style={{ padding: "10px 12px", borderRadius: 14, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", fontWeight: 800 }}>
             {orderNumber ? (
               <>
                 Order <span style={{ fontWeight: 950 }}>#{orderNumber}</span>
@@ -1019,7 +943,6 @@ export default function OrderPage() {
         </div>
       </div>
 
-      {/* Messages */}
       {err && (
         <div style={{ background: "#ffe5e5", padding: 12, borderRadius: 12, marginTop: 12, border: "1px solid #fecaca" }}>
           <b>Error:</b> {err}
@@ -1031,7 +954,6 @@ export default function OrderPage() {
         </div>
       )}
 
-      {/* Current tracked order status */}
       {hasTrackedOrder && (
         <div style={{ marginTop: 14, border: "1px solid #eee", borderRadius: 16, padding: 14, background: isReady ? "#ecfdf5" : "white" }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -1069,7 +991,6 @@ export default function OrderPage() {
         </div>
       )}
 
-      {/* Inputs + Cart */}
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr", gap: 16, marginTop: 16 }}>
         {isMobile ? (
           <>
@@ -1084,29 +1005,96 @@ export default function OrderPage() {
         )}
       </div>
 
-      {/* Show items for tracked order */}
-      {orderData?.items?.length ? (
-        <div style={{ marginTop: 16, border: "1px solid #eee", borderRadius: 16, padding: 14, background: "white" }}>
-          <h3 style={{ marginTop: 0 }}>Your items</h3>
-          <div style={{ display: "grid", gap: 8 }}>
-            {orderData.items.map((it) => (
-              <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                <div>
-                  <b>{it.qty}×</b> {it.name}
-                  {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
-                </div>
-                <div style={{ color: "#666" }}>{money(it.unit_price_cents * it.qty)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
       <div style={{ marginTop: 16, color: "#777", fontSize: 12 }}>
         Tip: Turn Sound ON (in the cart) to hear a ding when your order becomes READY.
       </div>
 
-      {/* ✅ Extras modal */}
+      {/* ✅ “Add extras?” picker modal (after adding main item) */}
+      {extrasPickerOpen && typeof extrasPickerParentIdx === "number" && cart[extrasPickerParentIdx] && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={closeExtrasPicker}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 640,
+              background: "white",
+              borderRadius: 16,
+              border: "1px solid #eee",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
+              <div style={{ fontSize: 16, fontWeight: 950 }}>Add Extras?</div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                Select extras for <b>{cart[extrasPickerParentIdx].name}</b>
+              </div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              {extrasItems.length === 0 ? (
+                <div style={{ color: "#666" }}>No extras found on the menu.</div>
+              ) : (
+                <div style={{ display: "grid", gap: 10 }}>
+                  {extrasItems.map((ex) => (
+                    <button
+                      key={ex.id}
+                      type="button"
+                      onClick={() => addExtraToParent(extrasPickerParentIdx, ex)}
+                      style={{
+                        textAlign: "left",
+                        padding: 12,
+                        borderRadius: 14,
+                        border: "1px solid #eee",
+                        background: "#fafafa",
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 10,
+                        alignItems: "center",
+                        fontWeight: 900,
+                      }}
+                    >
+                      <span>{ex.name}</span>
+                      <span>{money(ex.price_cents)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ marginTop: 12, color: "#666", fontSize: 12 }}>
+                Tip: You can also add/remove extras later in the cart.
+              </div>
+            </div>
+
+            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={closeExtrasPicker}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ Existing “choose which item this extra is for” modal (when tapping an extra item directly) */}
       {extrasModalOpen && pendingExtra && (
         <div
           role="dialog"
@@ -1137,29 +1125,16 @@ export default function OrderPage() {
           >
             <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
               <div style={{ fontSize: 16, fontWeight: 950 }}>Add Extra</div>
-              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
-                Choose which item this extra is for.
-              </div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>Choose which item this extra is for.</div>
             </div>
 
             <div style={{ padding: 14 }}>
-              <div
-                style={{
-                  border: "1px solid #eee",
-                  borderRadius: 14,
-                  padding: 12,
-                  background: "#fafafa",
-                }}
-              >
+              <div style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fafafa" }}>
                 <div style={{ fontWeight: 950 }}>{pendingExtra.name}</div>
-                <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
-                  {money(pendingExtra.price_cents)}
-                </div>
+                <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>{money(pendingExtra.price_cents)}</div>
               </div>
 
-              <div style={{ marginTop: 12, fontWeight: 900, fontSize: 13 }}>
-                Select parent item:
-              </div>
+              <div style={{ marginTop: 12, fontWeight: 900, fontSize: 13 }}>Select parent item:</div>
 
               <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                 {cart.map((line, idx) => (
@@ -1185,35 +1160,17 @@ export default function OrderPage() {
                     <span>
                       {line.name} <span style={{ opacity: 0.75, fontWeight: 800 }}>(x{line.qty})</span>
                     </span>
-                    <span style={{ opacity: 0.75, fontWeight: 800 }}>
-                      {extraTargetIdx === idx ? "Selected" : "Select"}
-                    </span>
+                    <span style={{ opacity: 0.75, fontWeight: 800 }}>{extraTargetIdx === idx ? "Selected" : "Select"}</span>
                   </button>
                 ))}
               </div>
             </div>
 
-            <div
-              style={{
-                padding: 14,
-                borderTop: "1px solid #eee",
-                display: "flex",
-                gap: 10,
-                justifyContent: "flex-end",
-                flexWrap: "wrap",
-              }}
-            >
+            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button
                 type="button"
                 onClick={closeExtrasModal}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid #ddd",
-                  background: "white",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
               >
                 Cancel
               </button>
@@ -1221,15 +1178,7 @@ export default function OrderPage() {
               <button
                 type="button"
                 onClick={confirmAddExtra}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "none",
-                  background: "#2563eb",
-                  color: "white",
-                  fontWeight: 950,
-                  cursor: "pointer",
-                }}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "none", background: "#2563eb", color: "white", fontWeight: 950, cursor: "pointer" }}
               >
                 Add to selected item
               </button>
