@@ -65,6 +65,7 @@ function catLower(v) {
 
 export default function OrderPage() {
   const nav = useNavigate();
+  const cartTopRef = useRef(null);
 
   const [menu, setMenu] = useState([]);
   // cart line:
@@ -695,7 +696,8 @@ export default function OrderPage() {
   );
 
   const CartBlock = (
-    <div>
+    // ✅ anchor for scrolling
+    <div ref={cartTopRef}>
       <div
         style={{
           border: "1px solid #eee",
@@ -1008,6 +1010,49 @@ export default function OrderPage() {
       <div style={{ marginTop: 16, color: "#777", fontSize: 12 }}>
         Tip: Turn Sound ON (in the cart) to hear a ding when your order becomes READY.
       </div>
+
+      {/* ✅ Floating Cart shortcut */}
+      <button
+        type="button"
+        onClick={() => {
+          cartTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+        style={{
+          position: "fixed",
+          right: 16,
+          bottom: 16,
+          zIndex: 9998,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "12px 14px",
+          borderRadius: 999,
+          border: "1px solid rgba(0,0,0,0.12)",
+          background: "white",
+          boxShadow: "0 14px 30px rgba(0,0,0,0.18)",
+          fontWeight: 900,
+          cursor: "pointer",
+        }}
+        aria-label="Go to cart"
+      >
+        <span style={{ fontSize: 18, lineHeight: 1 }}>🛒</span>
+        <span>Cart</span>
+        {cart.length > 0 ? (
+          <span
+            style={{
+              marginLeft: 2,
+              padding: "3px 8px",
+              borderRadius: 999,
+              background: "#111827",
+              color: "white",
+              fontSize: 12,
+              fontWeight: 950,
+            }}
+          >
+            {cart.length}
+          </span>
+        ) : null}
+      </button>
 
       {/* ✅ “Add extras?” picker modal (after adding main item) */}
       {extrasPickerOpen && typeof extrasPickerParentIdx === "number" && cart[extrasPickerParentIdx] && (
