@@ -5,7 +5,7 @@ import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
 function money(cents) {
-  return `R${(cents / 100).toFixed(2)}`;
+  return `R${(Number(cents || 0) / 100).toFixed(2)}`;
 }
 
 function groupByCategory(items) {
@@ -62,14 +62,24 @@ const EXTRAS_CATEGORY_LOWER = "extras";
 function catLower(v) {
   return String(v || "").trim().toLowerCase();
 }
+function cents(n) {
+  return Number(n || 0);
+}
 
 export default function OrderPage() {
   const nav = useNavigate();
+
+  // ✅ used by floating Cart button
   const cartTopRef = useRef(null);
 
   const [menu, setMenu] = useState([]);
   // cart line:
-  // { menu_item_id, name, price_cents, qty, item_notes, extras: [{menu_item_id,name,price_cents,qty}] }
+  // {
+  //   menu_item_id, name, price_cents, qty, item_notes,
+  //   extras: [{menu_item_id,name,price_cents,qty}],
+  //   modifiers?: { [group_id]: [modifier_item_id,...] },
+  //   extras_payload?: { groups:[{group_id,name,selected:[{id,name,price_cents}]}] }
+  // }
   const [cart, setCart] = useState([]);
   const [name, setName] = useState("");
   const [orderType, setOrderType] = useState("dine_in"); // dine_in | collection
@@ -102,15 +112,22 @@ export default function OrderPage() {
   // Staff role (only staff sees Back button)
   const [staffRole, setStaffRole] = useState(null); // "kitchen" | "waiter" | null
 
-  // ✅ “Add extras?” modal after choosing a main item
+  // ✅ “Add extras?” modal after choosing a main item (your old extras flow)
   const [extrasPickerOpen, setExtrasPickerOpen] = useState(false);
   const [extrasPickerParentIdx, setExtrasPickerParentIdx] = useState(null); // cart line index
-  const lastAddedParentIdxRef = useRef(null);
 
   // ✅ Existing modal when user taps an extra directly
   const [extrasModalOpen, setExtrasModalOpen] = useState(false);
   const [pendingExtra, setPendingExtra] = useState(null); // {id,name,price_cents}
   const [extraTargetIdx, setExtraTargetIdx] = useState(null); // selected cart line index
+
+  // ✅ NEW: Block-immediately modifier picker (per item)
+  const [modModalOpen, setModModalOpen] = useState(false);
+  const [modMenuItem, setModMenuItem] = useState(null); // menu item being customized
+  const [modGroups, setModGroups] = useState([]); // groups from RPC
+  const [modSelected, setModSelected] = useState({}); // { [group_id]: [modifier_item_id,...] }
+  const [modLoading, setModLoading] = useState(false);
+  const [modError, setModError] = useState("");
 
   const grouped = useMemo(() => groupByCategory(menu), [menu]);
 
@@ -145,7 +162,12 @@ export default function OrderPage() {
   }, [cart]);
 
   function ensureLineExtras(line) {
-    return { ...line, extras: Array.isArray(line.extras) ? line.extras : [] };
+    return {
+      ...line,
+      extras: Array.isArray(line.extras) ? line.extras : [],
+      modifiers: line.modifiers || null,
+      extras_payload: line.extras_payload || null,
+    };
   }
 
   function isExtrasItem(item) {
@@ -288,6 +310,19 @@ export default function OrderPage() {
     }
   }, [status, soundOn, orderId]);
 
+  // ✅ helper to scroll to cart
+  function scrollToCart() {
+    try {
+      if (cartTopRef.current?.scrollIntoView) {
+        cartTopRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    } catch {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }
+
   function addExtraToParent(parentIdx, extraItem) {
     setCart((prev) => {
       const next = prev.map(ensureLineExtras);
@@ -314,7 +349,6 @@ export default function OrderPage() {
   }
 
   function openExtrasPickerForParent(parentIdx) {
-    // only open if there are extras in menu
     if (!extrasItems.length) return;
     setExtrasPickerParentIdx(parentIdx);
     setExtrasPickerOpen(true);
@@ -325,36 +359,275 @@ export default function OrderPage() {
     setExtrasPickerParentIdx(null);
   }
 
-  function addMainToCart(item) {
+  // ==========================
+  // ✅ NEW: Modifiers (block immediately)
+  // ==========================
+
+  const modItemById = useMemo(() => {
+    const map = new Map(); // modifier_item_id -> {id,name,price_cents, group_id, group_name}
+    for (const g of modGroups || []) {
+      for (const it of g.items || []) {
+        map.set(it.id, { ...it, group_id: g.group_id, group_name: g.group_name });
+      }
+    }
+    return map;
+  }, [modGroups]);
+
+  function closeModifierModal() {
+    setModModalOpen(false);
+    setModMenuItem(null);
+    setModGroups([]);
+    setModSelected({});
+    setModLoading(false);
+    setModError("");
+  }
+
+  function groupSelectedCount(groupId) {
+    return (modSelected?.[groupId] || []).length;
+  }
+
+  function setSingleSelect(groupId, itemId) {
+    setModSelected((prev) => ({ ...prev, [groupId]: [itemId] }));
+  }
+
+  function toggleMultiSelect(groupId, itemId, maxSelect) {
+    setModSelected((prev) => {
+      const cur = prev?.[groupId] || [];
+      const has = cur.includes(itemId);
+
+      if (has) return { ...prev, [groupId]: cur.filter((x) => x !== itemId) };
+
+      if (cur.length >= maxSelect) return prev;
+
+      return { ...prev, [groupId]: [...cur, itemId] };
+    });
+  }
+
+  // ✅ fallback rules if your RPC doesn't provide min/max:
+  // - "cook" group: required single select
+  // - other groups: optional, max 3
+  function groupRules(g) {
+    const name = catLower(g?.group_name);
+    const hasMin = g?.min_select != null || g?.is_required != null;
+    const hasMax = g?.max_select != null;
+
+    let minSel = Number(g?.min_select ?? (g?.is_required ? 1 : 0));
+    let maxSel = Number(g?.max_select ?? 999);
+
+    if (!hasMin && !hasMax) {
+      if (name.includes("cook") || name.includes("cooking") || name.includes("done")) {
+        minSel = 1;
+        maxSel = 1;
+      } else {
+        minSel = 0;
+        maxSel = 3; // ✅ as requested
+      }
+    }
+
+    // also handle if you only provided one side
+    if (!hasMax) {
+      if (name.includes("cook") || name.includes("cooking") || name.includes("done")) maxSel = 1;
+      else maxSel = 3;
+    }
+    if (!hasMin) {
+      if (name.includes("cook") || name.includes("cooking") || name.includes("done")) minSel = 1;
+      else minSel = 0;
+    }
+
+    return { minSel, maxSel };
+  }
+
+  function validateModifiers() {
+    for (const g of modGroups || []) {
+      const chosen = groupSelectedCount(g.group_id);
+      const { minSel, maxSel } = groupRules(g);
+
+      if (chosen < minSel) {
+        return `Please select ${minSel === 1 ? "an option" : `at least ${minSel} options`} for "${g.group_name}".`;
+      }
+      if (chosen > maxSel) {
+        return `Please select no more than ${maxSel} options for "${g.group_name}".`;
+      }
+    }
+    return "";
+  }
+
+  function modifiersPriceCents() {
+    let total = 0;
+    for (const arr of Object.values(modSelected || {})) {
+      for (const id of arr || []) {
+        const mi = modItemById.get(id);
+        if (mi) total += cents(mi.price_cents);
+      }
+    }
+    return total;
+  }
+
+  function buildExtrasPayloadFromModifiers() {
+    return {
+      groups: (modGroups || []).map((g) => {
+        const selectedIds = modSelected?.[g.group_id] || [];
+        const selected = selectedIds
+          .map((id) => modItemById.get(id))
+          .filter(Boolean)
+          .map((x) => ({ id: x.id, name: x.name, price_cents: cents(x.price_cents) }));
+        return { group_id: g.group_id, name: g.group_name, selected };
+      }),
+    };
+  }
+
+  function addItemWithModifiersToCart() {
+    const msgErr = validateModifiers();
+    if (msgErr) {
+      setModError(msgErr);
+      return;
+    }
+
+    const item = modMenuItem;
+    if (!item) return;
+
+    const extrasPayload = buildExtrasPayloadFromModifiers();
+    const modsTotal = modifiersPriceCents();
+    const modsKey = JSON.stringify(modSelected || {});
+
     setCart((prev) => {
       const next = prev.map(ensureLineExtras);
-      const idx = next.findIndex((x) => x.menu_item_id === item.id && (x.item_notes || "") === "");
+
+      // Different modifier choices = different cart lines
+      const idx = next.findIndex(
+        (x) =>
+          x.menu_item_id === item.id &&
+          (x.item_notes || "") === "" &&
+          JSON.stringify(x.modifiers || {}) === modsKey
+      );
+
       if (idx >= 0) {
         const copy = [...next];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
-        lastAddedParentIdxRef.current = idx;
         return copy;
       }
-      const newIdx = next.length;
-      lastAddedParentIdxRef.current = newIdx;
+
       return [
         ...next,
         {
           menu_item_id: item.id,
           name: item.name,
-          price_cents: item.price_cents,
+          price_cents: cents(item.price_cents) + modsTotal,
           qty: 1,
           item_notes: "",
           extras: [],
+          modifiers: modSelected,
+          extras_payload: extrasPayload, // ✅ goes into order_items.extras if your place_order saves it
         },
       ];
     });
 
-    // ✅ after adding main item, offer extras
-    queueMicrotask(() => {
-      const idx = lastAddedParentIdxRef.current;
-      if (typeof idx === "number") openExtrasPickerForParent(idx);
-    });
+    closeModifierModal();
+  }
+
+  async function openModifierModalForMenuItem(item) {
+    setModError("");
+    setModLoading(true);
+    setModMenuItem(item);
+    setModGroups([]);
+    setModSelected({});
+    setModModalOpen(true);
+
+    try {
+      const { data, error } = await supabase.rpc("get_modifiers_for_menu_item", {
+        p_menu_item_id: item.id,
+      });
+      if (error) throw error;
+
+      const groups = Array.isArray(data) ? data : data || [];
+
+      // If no groups, close modal and add normally
+      if (!groups.length) {
+        closeModifierModal();
+
+        // normal add (no modifiers)
+        let newIdx = null;
+        setCart((prev) => {
+          const next = prev.map(ensureLineExtras);
+          const idx = next.findIndex(
+            (x) => x.menu_item_id === item.id && (x.item_notes || "") === "" && !x.modifiers
+          );
+
+          if (idx >= 0) {
+            const copy = [...next];
+            copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
+            newIdx = idx;
+            return copy;
+          }
+
+          newIdx = next.length;
+          return [
+            ...next,
+            {
+              menu_item_id: item.id,
+              name: item.name,
+              price_cents: cents(item.price_cents),
+              qty: 1,
+              item_notes: "",
+              extras: [],
+            },
+          ];
+        });
+
+        // optional old extras prompt
+        queueMicrotask(() => {
+          if (typeof newIdx === "number") openExtrasPickerForParent(newIdx);
+        });
+
+        return;
+      }
+
+      setModGroups(groups);
+    } catch (e) {
+      // If RPC fails, allow normal add (don’t block ordering)
+      closeModifierModal();
+
+      let newIdx = null;
+      setCart((prev) => {
+        const next = prev.map(ensureLineExtras);
+        const idx = next.findIndex(
+          (x) => x.menu_item_id === item.id && (x.item_notes || "") === "" && !x.modifiers
+        );
+
+        if (idx >= 0) {
+          const copy = [...next];
+          copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
+          newIdx = idx;
+          return copy;
+        }
+
+        newIdx = next.length;
+        return [
+          ...next,
+          {
+            menu_item_id: item.id,
+            name: item.name,
+            price_cents: cents(item.price_cents),
+            qty: 1,
+            item_notes: "",
+            extras: [],
+          },
+        ];
+      });
+
+      setErr(e?.message || "Could not load options, added item without modifiers.");
+
+      queueMicrotask(() => {
+        if (typeof newIdx === "number") openExtrasPickerForParent(newIdx);
+      });
+    } finally {
+      setModLoading(false);
+    }
+  }
+
+  // ✅ main add: block immediately with modifier modal if needed
+  function addMainToCart(item) {
+    openModifierModalForMenuItem(item);
   }
 
   function openExtrasModal(extraItem) {
@@ -457,13 +730,17 @@ export default function OrderPage() {
     if (!name.trim()) return setErr("Please enter your name.");
     if (cart.length === 0) return setErr("Your cart is empty.");
 
-    // ✅ Flatten payload: extras become regular items with note "EXTRA FOR: <parent name>"
+    // ✅ Flatten payload:
+    // - main items: include extras_payload (modifiers) in "extras" (if your place_order saves it)
+    // - old extras: still become regular items with note "EXTRA FOR: <parent name>"
     const payloadItems = [];
     for (const line of cart.map(ensureLineExtras)) {
       payloadItems.push({
         menu_item_id: line.menu_item_id,
         qty: line.qty,
         item_notes: line.item_notes || "",
+        // ✅ best place to store steak cooking/add-ons etc
+        extras: line.extras_payload || null,
       });
 
       for (const ex of line.extras || []) {
@@ -477,7 +754,6 @@ export default function OrderPage() {
 
     setIsPlacing(true);
     const { data, error } = await supabase.rpc("place_order", {
-      // this will work once you drop the text overload
       p_order_type: orderType,
       p_customer_name: name.trim(),
       p_items: payloadItems,
@@ -696,7 +972,6 @@ export default function OrderPage() {
   );
 
   const CartBlock = (
-    // ✅ anchor for scrolling
     <div ref={cartTopRef}>
       <div
         style={{
@@ -746,11 +1021,30 @@ export default function OrderPage() {
         ) : (
           <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
             {cart.map((x, i) => (
-              <div key={`${x.menu_item_id}-${i}`} style={{ border: "1px solid #f0f0f0", borderRadius: 14, padding: 10, background: "#fafafa" }}>
+              <div
+                key={`${x.menu_item_id}-${i}`}
+                style={{ border: "1px solid #f0f0f0", borderRadius: 14, padding: 10, background: "#fafafa" }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                   <div style={{ fontWeight: 900 }}>{x.name}</div>
                   <div style={{ fontWeight: 900 }}>{money(x.price_cents * x.qty)}</div>
                 </div>
+
+                {/* ✅ show selected modifiers under item */}
+                {x.extras_payload?.groups?.some((g) => (g.selected || []).length) ? (
+                  <div style={{ marginTop: 8, color: "#374151", fontSize: 12 }}>
+                    {x.extras_payload.groups
+                      .filter((g) => (g.selected || []).length > 0)
+                      .map((g) => (
+                        <div key={g.group_id} style={{ marginTop: 4 }}>
+                          <span style={{ fontWeight: 900 }}>{g.name}:</span>{" "}
+                          <span style={{ color: "#4b5563" }}>
+                            {(g.selected || []).map((s) => s.name).join(", ")}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                ) : null}
 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -874,6 +1168,46 @@ export default function OrderPage() {
 
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto" }}>
+      {/* ✅ Floating Cart button (right side, static) */}
+      <button
+        type="button"
+        onClick={scrollToCart}
+        style={{
+          position: "fixed",
+          right: 14,
+          top: "50%",
+          transform: "translateY(-50%)",
+          zIndex: 9000,
+          border: "1px solid rgba(0,0,0,0.12)",
+          borderRadius: 999,
+          padding: "10px 12px",
+          background: "white",
+          boxShadow: "0 10px 25px rgba(0,0,0,0.14)",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          fontWeight: 950,
+        }}
+        title="Go to Cart"
+      >
+        <span aria-hidden="true" style={{ fontSize: 18 }}>🛒</span>
+        <span>Cart</span>
+        <span
+          style={{
+            marginLeft: 4,
+            background: "#111",
+            color: "white",
+            borderRadius: 999,
+            padding: "2px 8px",
+            fontSize: 12,
+            fontWeight: 950,
+          }}
+        >
+          {cart.reduce((sum, x) => sum + (x.qty || 0), 0)}
+        </span>
+      </button>
+
       {/* HERO HEADER */}
       <div
         style={{
@@ -929,11 +1263,24 @@ export default function OrderPage() {
             </button>
           )}
 
-          <div style={{ ...statusPillStyle(status), ...(isReady ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" } : {}) }}>
+          <div
+            style={{
+              ...statusPillStyle(status),
+              ...(isReady ? { background: "rgba(34,197,94,0.35)", borderColor: "rgba(34,197,94,0.55)" } : {}),
+            }}
+          >
             {status ? `STATUS: ${normalizeStatus(status)}` : "STATUS: —"}
           </div>
 
-          <div style={{ padding: "10px 12px", borderRadius: 14, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", fontWeight: 800 }}>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 14,
+              background: "rgba(255,255,255,0.08)",
+              border: "1px solid rgba(255,255,255,0.12)",
+              fontWeight: 800,
+            }}
+          >
             {orderNumber ? (
               <>
                 Order <span style={{ fontWeight: 950 }}>#{orderNumber}</span>
@@ -1011,48 +1358,151 @@ export default function OrderPage() {
         Tip: Turn Sound ON (in the cart) to hear a ding when your order becomes READY.
       </div>
 
-      {/* ✅ Floating Cart shortcut */}
-      <button
-        type="button"
-        onClick={() => {
-          cartTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }}
-        style={{
-          position: "fixed",
-          right: 16,
-          bottom: 16,
-          zIndex: 9998,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "12px 14px",
-          borderRadius: 999,
-          border: "1px solid rgba(0,0,0,0.12)",
-          background: "white",
-          boxShadow: "0 14px 30px rgba(0,0,0,0.18)",
-          fontWeight: 900,
-          cursor: "pointer",
-        }}
-        aria-label="Go to cart"
-      >
-        <span style={{ fontSize: 18, lineHeight: 1 }}>🛒</span>
-        <span>Cart</span>
-        {cart.length > 0 ? (
-          <span
+      {/* ✅ Modifier modal (BLOCK immediately) */}
+      {modModalOpen && modMenuItem && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={closeModifierModal}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 10000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
             style={{
-              marginLeft: 2,
-              padding: "3px 8px",
-              borderRadius: 999,
-              background: "#111827",
-              color: "white",
-              fontSize: 12,
-              fontWeight: 950,
+              width: "100%",
+              maxWidth: 720,
+              background: "white",
+              borderRadius: 16,
+              border: "1px solid #eee",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
             }}
           >
-            {cart.length}
-          </span>
-        ) : null}
-      </button>
+            <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
+              <div style={{ fontSize: 16, fontWeight: 950 }}>Customize: {modMenuItem.name}</div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                Base: <b>{money(modMenuItem.price_cents)}</b> • Add-ons: <b>{money(modifiersPriceCents())}</b>
+              </div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              {modLoading ? <div style={{ color: "#666" }}>Loading options…</div> : null}
+
+              {!modLoading &&
+                (modGroups || []).map((g) => {
+                  const { minSel, maxSel } = groupRules(g);
+                  const chosen = groupSelectedCount(g.group_id);
+                  const isSingle = maxSel === 1;
+
+                  return (
+                    <div key={g.group_id} style={{ borderTop: "1px solid #f1f1f1", paddingTop: 12, marginTop: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+                        <div style={{ fontWeight: 950 }}>
+                          {g.group_name}{" "}
+                          {minSel > 0 ? (
+                            <span style={{ fontSize: 12, color: "#dc2626", fontWeight: 900 }}>(required)</span>
+                          ) : (
+                            <span style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>(optional)</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>
+                          {chosen}/{maxSel === 999 ? "∞" : maxSel}
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                        {(g.items || []).map((it) => {
+                          const selectedIds = modSelected?.[g.group_id] || [];
+                          const isSelected = selectedIds.includes(it.id);
+
+                          return (
+                            <button
+                              key={it.id}
+                              type="button"
+                              onClick={() => {
+                                setModError("");
+                                if (isSingle) setSingleSelect(g.group_id, it.id);
+                                else toggleMultiSelect(g.group_id, it.id, maxSel);
+                              }}
+                              style={{
+                                textAlign: "left",
+                                padding: 12,
+                                borderRadius: 14,
+                                border: "1px solid #e5e5e5",
+                                background: isSelected ? "#111" : "white",
+                                color: isSelected ? "white" : "#111",
+                                cursor: "pointer",
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                alignItems: "center",
+                                fontWeight: 900,
+                              }}
+                            >
+                              <span>{it.name}</span>
+                              <span style={{ opacity: isSelected ? 0.9 : 0.8 }}>
+                                {cents(it.price_cents) > 0 ? `+ ${money(it.price_cents)}` : "Included"}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {!isSingle && (
+                        <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+                          Choose up to <b>{maxSel}</b>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+              {modError ? (
+                <div style={{ marginTop: 12, background: "#ffe5e5", border: "1px solid #fecaca", padding: 10, borderRadius: 12 }}>
+                  <b>Error:</b> {modError}
+                </div>
+              ) : null}
+            </div>
+
+            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={closeModifierModal}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                disabled={modLoading}
+                onClick={addItemWithModifiersToCart}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "#2563eb",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                  opacity: modLoading ? 0.6 : 1,
+                }}
+              >
+                Add to cart • {money(cents(modMenuItem.price_cents) + modifiersPriceCents())}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ✅ “Add extras?” picker modal (after adding main item) */}
       {extrasPickerOpen && typeof extrasPickerParentIdx === "number" && cart[extrasPickerParentIdx] && (
