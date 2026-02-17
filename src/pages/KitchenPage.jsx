@@ -18,14 +18,41 @@ function withTimeout(promise, ms, message = "Request timed out. Please try again
 
 /** ✅ Extras helpers (UI only) */
 function parseExtraFor(note) {
-  const s = String(note || "").trim();
+  const raw = String(note || "").trim();
+  const upper = raw.toUpperCase();
   const prefix = "EXTRA FOR:";
-  if (!s.toUpperCase().startsWith(prefix)) return null;
-  return s.slice(prefix.length).trim();
+  const idx = upper.indexOf(prefix);
+  if (idx !== 0) return null;
+  return raw.slice(prefix.length).trim();
 }
+function normName(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, ""); // strip punctuation (unicode-safe)
+}
+function findBestParentIndex(mains, parentName) {
+  const p = normName(parentName);
+  if (!p) return -1;
 
+  // 1) exact normalized match
+  for (let i = 0; i < mains.length; i++) {
+    if (normName(mains[i].name) === p) return i;
+  }
+
+  // 2) substring match either way
+  for (let i = 0; i < mains.length; i++) {
+    const m = normName(mains[i].name);
+    if (!m) continue;
+    if (m.includes(p) || p.includes(m)) return i;
+  }
+
+  return -1;
+}
 function groupItemsWithExtras(orderItems) {
   const list = Array.isArray(orderItems) ? orderItems : [];
+
   const mains = [];
   const extras = [];
 
@@ -35,29 +62,21 @@ function groupItemsWithExtras(orderItems) {
     else mains.push({ ...it, __extras: [] });
   }
 
-  const byName = new Map(); // lower name -> [mainItem...]
-  for (const m of mains) {
-    const key = String(m.name || "").trim().toLowerCase();
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(m);
-  }
-
+  // attach extras to best matching main
   const unmatched = [];
   for (const ex of extras) {
-    const key = String(ex.__parentName || "").trim().toLowerCase();
-    const candidates = byName.get(key);
-    if (!candidates || candidates.length === 0) {
+    const idx = findBestParentIndex(mains, ex.__parentName);
+    if (idx >= 0) {
+      mains[idx].__extras.push(ex);
+    } else {
       unmatched.push(ex);
-      continue;
     }
-    // attach to first matching main item
-    candidates[0].__extras.push(ex);
   }
 
-  return [...mains, ...unmatched].map((x) => ({
-    ...x,
-    __extras: Array.isArray(x.__extras) ? x.__extras : [],
-  }));
+  // IMPORTANT: return mains FIRST (with nested extras)
+  // and ONLY THEN unmatched (rare) so you can still see them.
+  return [...mains, ...unmatched];
+  console.log(o.order_items?.map(x => x.item_notes));
 }
 
 const COLUMNS = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
