@@ -92,40 +92,67 @@ function groupItemsWithExtras(orderItems) {
   }));
 }
 
-/** ✅ NEW: render jsonb extras stored in order_items.extras */
-function safeArray(v) {
-  return Array.isArray(v) ? v : [];
+/** ✅ NEW: render jsonb extras stored in order_items.extras
+ * Expected shape:
+ * { groups: [ { name, group_id, selected: [ { id, name, price_cents } ] } ] }
+ */
+function money(cents) {
+  return `R${(cents / 100).toFixed(2)}`;
+}
+
+function safeJson(v) {
+  try {
+    if (v == null) return null;
+    if (typeof v === "object") return v;
+    return JSON.parse(v);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeExtrasGroups(extras) {
+  const obj = safeJson(extras);
+  const groups = obj?.groups;
+  if (!Array.isArray(groups) || groups.length === 0) return [];
+
+  return groups
+    .map((g) => ({
+      name: String(g?.name || "Extras"),
+      selected: Array.isArray(g?.selected) ? g.selected : [],
+    }))
+    .filter((g) => g.selected.length > 0);
 }
 
 function renderExtrasJson(extras) {
-  const list = safeArray(extras);
-  if (list.length === 0) return null;
+  const groups = normalizeExtrasGroups(extras);
+  if (groups.length === 0) return null;
 
   return (
-    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
-      {list.map((ex, idx) => {
-        const label = ex?.label ?? ex?.name ?? "Extra";
-        const value = ex?.value ?? ex?.choice ?? "";
-        const qty = ex?.qty ?? ex?.quantity ?? 1;
-
-        const looksLikeChoice = value && (ex?.qty == null && ex?.quantity == null);
-
-        return (
-          <div key={idx} style={{ fontSize: 12, color: "#555" }}>
-            •{" "}
-            {looksLikeChoice ? (
-              <>
-                <b>{label}:</b> {value}
-              </>
-            ) : (
-              <>
-                <b>{qty}×</b> {label}
-                {value ? <span style={{ color: "#666" }}> — {value}</span> : null}
-              </>
-            )}
+    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 8 }}>
+      {groups.map((g, gi) => (
+        <div key={gi} style={{ display: "grid", gap: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280" }}>{g.name}</div>
+          <div style={{ display: "grid", gap: 4 }}>
+            {g.selected.map((s, si) => (
+              <div
+                key={si}
+                style={{
+                  fontSize: 12,
+                  color: "#555",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 10,
+                }}
+              >
+                <div>
+                  <span style={{ opacity: 0.7 }}>↳</span> {s?.name || "Option"}
+                </div>
+                {Number(s?.price_cents || 0) > 0 ? <div style={{ color: "#666" }}>{money(s.price_cents)}</div> : null}
+              </div>
+            ))}
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -412,7 +439,7 @@ export default function WaiterPage() {
 
                   {it.item_notes && !isUnmatchedExtra ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
 
-                  {/* jsonb extras + cooking */}
+                  {/* ✅ jsonb extras + cooking */}
                   {renderExtrasJson(it.extras)}
 
                   {isUnmatchedExtra ? <div style={{ color: "#6b7280" }}>{it.item_notes}</div> : null}
