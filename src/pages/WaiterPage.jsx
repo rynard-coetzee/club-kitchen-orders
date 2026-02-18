@@ -52,7 +52,7 @@ function overdueCardStyle(mins) {
   return { borderColor: "#e5e5e5", background: "white" };
 }
 
-/** ✅ Extras helpers (UI only) */
+/** ✅ OLD fallback (extras were separate order_items with "EXTRA FOR:") */
 function parseExtraFor(note) {
   const s = String(note || "").trim();
   const prefix = "EXTRA FOR:";
@@ -82,11 +82,8 @@ function groupItemsWithExtras(orderItems) {
   for (const ex of extras) {
     const key = String(ex.__parentName || "").trim().toLowerCase();
     const candidates = byName.get(key);
-    if (!candidates || candidates.length === 0) {
-      unmatched.push(ex);
-      continue;
-    }
-    candidates[0].__extras.push(ex);
+    if (!candidates || candidates.length === 0) unmatched.push(ex);
+    else candidates[0].__extras.push(ex);
   }
 
   return [...mains, ...unmatched].map((x) => ({
@@ -95,20 +92,55 @@ function groupItemsWithExtras(orderItems) {
   }));
 }
 
+/** ✅ NEW: render jsonb extras stored in order_items.extras */
+function safeArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function renderExtrasJson(extras) {
+  const list = safeArray(extras);
+  if (list.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
+      {list.map((ex, idx) => {
+        const label = ex?.label ?? ex?.name ?? "Extra";
+        const value = ex?.value ?? ex?.choice ?? "";
+        const qty = ex?.qty ?? ex?.quantity ?? 1;
+
+        const looksLikeChoice = value && (ex?.qty == null && ex?.quantity == null);
+
+        return (
+          <div key={idx} style={{ fontSize: 12, color: "#555" }}>
+            •{" "}
+            {looksLikeChoice ? (
+              <>
+                <b>{label}:</b> {value}
+              </>
+            ) : (
+              <>
+                <b>{qty}×</b> {label}
+                {value ? <span style={{ color: "#666" }}> — {value}</span> : null}
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function WaiterPage() {
   const nav = useNavigate();
 
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
   const [busyOrderId, setBusyOrderId] = useState(null);
-
   const [compact, setCompact] = useState(false);
 
-  // sound
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem("waiter_sound") === "1");
-  const prevStatusMapRef = useRef(new Map()); // orderId -> lastStatus
+  const prevStatusMapRef = useRef(new Map());
 
-  // prevent double-intervals
   const pollRef = useRef(null);
   const aliveRef = useRef(true);
 
@@ -152,11 +184,8 @@ export default function WaiterPage() {
 
     if (!roleRes.ok) {
       stopPolling();
-      if (roleRes.reason === "not_waiter") {
-        nav("/kitchen", { replace: true });
-      } else {
-        nav("/login", { replace: true });
-      }
+      if (roleRes.reason === "not_waiter") nav("/kitchen", { replace: true });
+      else nav("/login", { replace: true });
       return;
     }
 
@@ -177,7 +206,6 @@ export default function WaiterPage() {
 
     if (soundOn) {
       const prevMap = prevStatusMapRef.current;
-
       for (const o of nextOrders) {
         const prev = String(prevMap.get(o.id) || "").trim().toLowerCase();
         const now = String(o.status || "").trim().toLowerCase();
@@ -206,10 +234,7 @@ export default function WaiterPage() {
     aliveRef.current = true;
 
     load();
-
-    if (!pollRef.current) {
-      pollRef.current = setInterval(load, 3000);
-    }
+    if (!pollRef.current) pollRef.current = setInterval(load, 3000);
 
     return () => {
       aliveRef.current = false;
@@ -314,11 +339,7 @@ export default function WaiterPage() {
           type="button"
           disabled={busy}
           onClick={() => setStatus(o.id, "cancelled")}
-          style={{
-            ...btnBase,
-            border: "1px solid #fecaca",
-            background: "#fff1f2",
-          }}
+          style={{ ...btnBase, border: "1px solid #fecaca", background: "#fff1f2" }}
         >
           Cancel
         </button>
@@ -352,11 +373,7 @@ export default function WaiterPage() {
             type="button"
             disabled={busy}
             onClick={() => setStatus(o.id, "paid")}
-            style={{
-              ...btnBase,
-              border: "1px solid #bbf7d0",
-              background: "#ecfdf5",
-            }}
+            style={{ ...btnBase, border: "1px solid #bbf7d0", background: "#ecfdf5" }}
           >
             Paid
           </button>
@@ -384,20 +401,24 @@ export default function WaiterPage() {
           </div>
         </div>
 
-        {/* ✅ Group extras under parent items */}
-        <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+        <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
           {groupItemsWithExtras(o.order_items || []).map((it) => {
             const isUnmatchedExtra = Boolean(parseExtraFor(it.item_notes));
+
             return (
               <div key={it.id} style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10 }}>
-                  <div>
-                    <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
-                    {it.item_notes && !isUnmatchedExtra ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
-                    {isUnmatchedExtra ? <div style={{ color: "#6b7280" }}>{it.item_notes}</div> : null}
-                  </div>
+                <div style={{ fontSize: 13 }}>
+                  <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
+
+                  {it.item_notes && !isUnmatchedExtra ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
+
+                  {/* jsonb extras + cooking */}
+                  {renderExtrasJson(it.extras)}
+
+                  {isUnmatchedExtra ? <div style={{ color: "#6b7280" }}>{it.item_notes}</div> : null}
                 </div>
 
+                {/* old approach nested extras */}
                 {Array.isArray(it.__extras) && it.__extras.length > 0 ? (
                   <div style={{ marginLeft: 14, display: "grid", gap: 6 }}>
                     {it.__extras.map((ex) => (
@@ -501,16 +522,7 @@ export default function WaiterPage() {
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginTop: 16 }}>
           {COLUMNS.map((st) => (
-            <div
-              key={st}
-              style={{
-                border: "1px solid #eee",
-                borderRadius: 14,
-                padding: 12,
-                background: "#fafafa",
-                minHeight: 260,
-              }}
-            >
+            <div key={st} style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fafafa", minHeight: 260 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                 <h2 style={{ margin: 0, textTransform: "capitalize" }}>{st.replace("_", " ")}</h2>
                 <div style={{ color: "#666", fontSize: 12 }}>{(byStatus.get(st) || []).length}</div>
