@@ -52,6 +52,10 @@ function overdueCardStyle(mins) {
   return { borderColor: "#e5e5e5", background: "white" };
 }
 
+function money(cents) {
+  return `R${(cents / 100).toFixed(2)}`;
+}
+
 /** ✅ OLD fallback (extras were separate order_items with "EXTRA FOR:") */
 function parseExtraFor(note) {
   const s = String(note || "").trim();
@@ -92,39 +96,63 @@ function groupItemsWithExtras(orderItems) {
   }));
 }
 
-/** ✅ NEW: render jsonb extras stored in order_items.extras
- * Expected shape:
- * { groups: [ { name, group_id, selected: [ { id, name, price_cents } ] } ] }
- */
-function money(cents) {
-  return `R${(cents / 100).toFixed(2)}`;
-}
-
+/** ✅ NEW: robust jsonb extras renderer for order_items.extras */
 function safeJson(v) {
   try {
     if (v == null) return null;
     if (typeof v === "object") return v;
-    return JSON.parse(v);
+    if (typeof v === "string" && v.trim() === "") return null;
+    if (typeof v === "string") return JSON.parse(v);
+    return null;
   } catch {
     return null;
   }
 }
 
-function normalizeExtrasGroups(extras) {
-  const obj = safeJson(extras);
-  const groups = obj?.groups;
-  if (!Array.isArray(groups) || groups.length === 0) return [];
+function asArray(v) {
+  return Array.isArray(v) ? v : [];
+}
 
-  return groups
-    .map((g) => ({
-      name: String(g?.name || "Extras"),
-      selected: Array.isArray(g?.selected) ? g.selected : [],
-    }))
-    .filter((g) => g.selected.length > 0);
+function normalizeExtrasToGroups(extras) {
+  const obj = safeJson(extras);
+
+  if (Array.isArray(obj)) {
+    const flat = [];
+    for (const entry of obj) {
+      if (entry?.groups && Array.isArray(entry.groups)) flat.push(...entry.groups);
+      else flat.push(entry);
+    }
+    return flat
+      .map((g) => ({
+        name: String(g?.name || g?.label || "Extras"),
+        selected: asArray(g?.selected),
+      }))
+      .filter((g) => g.selected.length > 0);
+  }
+
+  if (obj && Array.isArray(obj.groups)) {
+    return obj.groups
+      .map((g) => ({
+        name: String(g?.name || g?.label || "Extras"),
+        selected: asArray(g?.selected),
+      }))
+      .filter((g) => g.selected.length > 0);
+  }
+
+  if (obj && obj.selected && Array.isArray(obj.selected)) {
+    return [
+      {
+        name: String(obj?.name || obj?.label || "Extras"),
+        selected: asArray(obj.selected),
+      },
+    ].filter((g) => g.selected.length > 0);
+  }
+
+  return [];
 }
 
 function renderExtrasJson(extras) {
-  const groups = normalizeExtrasGroups(extras);
+  const groups = normalizeExtrasToGroups(extras);
   if (groups.length === 0) return null;
 
   return (
@@ -132,24 +160,39 @@ function renderExtrasJson(extras) {
       {groups.map((g, gi) => (
         <div key={gi} style={{ display: "grid", gap: 4 }}>
           <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280" }}>{g.name}</div>
+
           <div style={{ display: "grid", gap: 4 }}>
-            {g.selected.map((s, si) => (
-              <div
-                key={si}
-                style={{
-                  fontSize: 12,
-                  color: "#555",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 10,
-                }}
-              >
-                <div>
-                  <span style={{ opacity: 0.7 }}>↳</span> {s?.name || "Option"}
+            {g.selected.map((s, si) => {
+              const name = s?.name || s?.label || "Option";
+              const price = Number(s?.price_cents || 0);
+              const qty = Number.isFinite(Number(s?.qty)) ? Number(s.qty) : null;
+
+              return (
+                <div
+                  key={si}
+                  style={{
+                    fontSize: 12,
+                    color: "#555",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 10,
+                  }}
+                >
+                  <div>
+                    <span style={{ opacity: 0.7 }}>↳</span>{" "}
+                    {qty && qty > 1 ? (
+                      <>
+                        <b>{qty}×</b> {name}
+                      </>
+                    ) : (
+                      name
+                    )}
+                  </div>
+
+                  {price > 0 ? <div style={{ color: "#666" }}>{money(price)}</div> : null}
                 </div>
-                {Number(s?.price_cents || 0) > 0 ? <div style={{ color: "#666" }}>{money(s.price_cents)}</div> : null}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ))}

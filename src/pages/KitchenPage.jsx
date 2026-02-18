@@ -68,35 +68,74 @@ function groupItemsWithExtras(orderItems) {
   return [...mains, ...unmatched];
 }
 
-/** ✅ NEW: render jsonb extras stored in order_items.extras
- * Expected shape:
- * { groups: [ { name, group_id, selected: [ { id, name, price_cents } ] } ] }
+/** ✅ NEW: robust jsonb extras renderer for order_items.extras
+ * Handles shapes:
+ * - stringified json
+ * - { groups: [{ name, selected: [...] }] }
+ * - [{ name, selected: [...] }, ...]
+ * - { name, selected: [...] }
  */
 function safeJson(v) {
   try {
     if (v == null) return null;
     if (typeof v === "object") return v; // Supabase often returns jsonb as object already
-    return JSON.parse(v);
+    if (typeof v === "string" && v.trim() === "") return null;
+    if (typeof v === "string") return JSON.parse(v);
+    return null;
   } catch {
     return null;
   }
 }
 
-function normalizeExtrasGroups(extras) {
-  const obj = safeJson(extras);
-  const groups = obj?.groups;
-  if (!Array.isArray(groups) || groups.length === 0) return [];
+function asArray(v) {
+  return Array.isArray(v) ? v : [];
+}
 
-  return groups
-    .map((g) => ({
-      name: String(g?.name || "Extras"),
-      selected: Array.isArray(g?.selected) ? g.selected : [],
-    }))
-    .filter((g) => g.selected.length > 0);
+function normalizeExtrasToGroups(extras) {
+  const obj = safeJson(extras);
+
+  // If it's literally an array, treat it as groups array
+  if (Array.isArray(obj)) {
+    // could be [{name, selected}] or [{groups:[...]}]
+    // flatten any nested {groups:[...]}
+    const flat = [];
+    for (const entry of obj) {
+      if (entry?.groups && Array.isArray(entry.groups)) flat.push(...entry.groups);
+      else flat.push(entry);
+    }
+    return flat
+      .map((g) => ({
+        name: String(g?.name || g?.label || "Extras"),
+        selected: asArray(g?.selected),
+      }))
+      .filter((g) => g.selected.length > 0);
+  }
+
+  // If it's object with groups
+  if (obj && Array.isArray(obj.groups)) {
+    return obj.groups
+      .map((g) => ({
+        name: String(g?.name || g?.label || "Extras"),
+        selected: asArray(g?.selected),
+      }))
+      .filter((g) => g.selected.length > 0);
+  }
+
+  // If it's a single group object {name, selected}
+  if (obj && obj.selected && Array.isArray(obj.selected)) {
+    return [
+      {
+        name: String(obj?.name || obj?.label || "Extras"),
+        selected: asArray(obj.selected),
+      },
+    ].filter((g) => g.selected.length > 0);
+  }
+
+  return [];
 }
 
 function renderExtrasJson(extras) {
-  const groups = normalizeExtrasGroups(extras);
+  const groups = normalizeExtrasToGroups(extras);
   if (groups.length === 0) return null;
 
   return (
@@ -104,24 +143,39 @@ function renderExtrasJson(extras) {
       {groups.map((g, gi) => (
         <div key={gi} style={{ display: "grid", gap: 4 }}>
           <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280" }}>{g.name}</div>
+
           <div style={{ display: "grid", gap: 4 }}>
-            {g.selected.map((s, si) => (
-              <div
-                key={si}
-                style={{
-                  fontSize: 12,
-                  color: "#555",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 10,
-                }}
-              >
-                <div>
-                  <span style={{ opacity: 0.7 }}>↳</span> {s?.name || "Option"}
+            {g.selected.map((s, si) => {
+              const name = s?.name || s?.label || "Option";
+              const price = Number(s?.price_cents || 0);
+              const qty = Number.isFinite(Number(s?.qty)) ? Number(s.qty) : null;
+
+              return (
+                <div
+                  key={si}
+                  style={{
+                    fontSize: 12,
+                    color: "#555",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 10,
+                  }}
+                >
+                  <div>
+                    <span style={{ opacity: 0.7 }}>↳</span>{" "}
+                    {qty && qty > 1 ? (
+                      <>
+                        <b>{qty}×</b> {name}
+                      </>
+                    ) : (
+                      name
+                    )}
+                  </div>
+
+                  {price > 0 ? <div style={{ color: "#666" }}>{money(price)}</div> : null}
                 </div>
-                {Number(s?.price_cents || 0) > 0 ? <div style={{ color: "#666" }}>{money(s.price_cents)}</div> : null}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ))}
@@ -442,21 +496,20 @@ export default function KitchenPage() {
                   <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
                     {groupItemsWithExtras(o.order_items || []).map((it) => {
                       const isUnmatchedExtra = Boolean(parseExtraFor(it.item_notes));
+
                       return (
                         <div key={it.id} style={{ display: "grid", gap: 6 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                             <div>
                               <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
 
-                              {/* normal note */}
                               {it.item_notes && !isUnmatchedExtra ? (
                                 <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
                               ) : null}
 
-                              {/* ✅ jsonb extras + cooking */}
+                              {/* ✅ NEW extras renderer (works for your {groups:[...]} format) */}
                               {renderExtrasJson(it.extras)}
 
-                              {/* unmatched extras from old approach */}
                               {isUnmatchedExtra ? <div style={{ color: "#6b7280", fontSize: 12 }}>{it.item_notes}</div> : null}
                             </div>
 
