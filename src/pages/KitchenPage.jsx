@@ -16,7 +16,7 @@ function withTimeout(promise, ms, message = "Request timed out. Please try again
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
-/** ✅ OLD fallback (extras stored as separate order_items with "EXTRA FOR:" in item_notes) */
+/** OLD fallback (extras stored as separate order_items with "EXTRA FOR:" in item_notes) */
 function parseExtraFor(note) {
   const raw = String(note || "").trim();
   const upper = raw.toUpperCase();
@@ -45,101 +45,72 @@ function findBestParentIndex(mains, parentName) {
   }
   return -1;
 }
-function groupItemsWithOldExtras(orderItems) {
+function groupItemsWithExtras(orderItems) {
   const list = Array.isArray(orderItems) ? orderItems : [];
-
   const mains = [];
   const extras = [];
 
   for (const it of list) {
     const parentName = parseExtraFor(it.item_notes);
     if (parentName) extras.push({ ...it, __parentName: parentName });
-    else mains.push({ ...it, __oldExtras: [] });
+    else mains.push({ ...it, __extras: [] });
   }
 
   const unmatched = [];
   for (const ex of extras) {
     const idx = findBestParentIndex(mains, ex.__parentName);
-    if (idx >= 0) mains[idx].__oldExtras.push(ex);
+    if (idx >= 0) mains[idx].__extras.push(ex);
     else unmatched.push(ex);
   }
 
   return [...mains, ...unmatched];
 }
 
-/** ✅ NEW: order_items.extras jsonb is now: { groups: [{ name, group_id, selected:[{id,name,price_cents}] }] } */
+/** NEW: parse order_items.extras jsonb that looks like:
+ * {"groups":[{"name":"Cooking","group_id":1,"selected":[{"id":1,"name":"Rare","price_cents":0}]}]}
+ */
 function safeArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
-function parseExtrasGroups(extras) {
-  // supports:
-  // 1) your current shape: {groups:[...]}
-  // 2) older array shapes: [...]
-  if (!extras) return { lines: [], addPerUnitCents: 0 };
+function parseExtrasGroups(extrasJson) {
+  // Accept: null, [], {}, {"groups":[...]}
+  const obj = extrasJson && typeof extrasJson === "object" ? extrasJson : null;
+  const groups = obj && !Array.isArray(obj) ? safeArray(obj.groups) : safeArray(extrasJson);
 
-  // current shape
-  if (typeof extras === "object" && !Array.isArray(extras) && Array.isArray(extras.groups)) {
-    const groups = safeArray(extras.groups);
-    const lines = [];
-    let addPerUnitCents = 0;
+  // We only support the new real format: [{name, selected:[{name,price_cents}]}] OR {groups:[...]}
+  const lines = [];
+  let totalExtrasCents = 0;
 
-    for (const g of groups) {
-      const gName = String(g?.name || "").trim() || "Option";
-      const selected = safeArray(g?.selected);
+  for (const g of groups) {
+    const gName = String(g?.name || "").trim();
+    const selected = safeArray(g?.selected);
+    if (!gName || selected.length === 0) continue;
 
-      if (selected.length === 0) continue;
-
-      const parts = selected.map((s) => {
-        const n = String(s?.name || "").trim() || "Selected";
-        const pc = Number(s?.price_cents || 0);
-        if (pc > 0) {
-          addPerUnitCents += pc;
-          return `${n} (+${money(pc)})`;
-        }
-        return n; // cooking style etc
-      });
-
-      lines.push(`${gName}: ${parts.join(", ")}`);
+    const names = [];
+    for (const s of selected) {
+      const n = String(s?.name || "").trim();
+      if (n) names.push(n);
+      totalExtrasCents += Number(s?.price_cents || 0);
     }
 
-    return { lines, addPerUnitCents };
-  }
-
-  // legacy: array of objects
-  if (Array.isArray(extras)) {
-    const list = extras;
-    const lines = [];
-    let addPerUnitCents = 0;
-
-    for (const ex of list) {
-      const label = String(ex?.label ?? ex?.name ?? "Extra").trim();
-      const value = String(ex?.value ?? ex?.choice ?? "").trim();
-      const pc = Number(ex?.price_cents || 0);
-      const qty = ex?.qty ?? ex?.quantity;
-
-      if (pc > 0) addPerUnitCents += pc;
-
-      if (value) lines.push(`${label}: ${value}${pc > 0 ? ` (+${money(pc)})` : ""}`);
-      else if (typeof qty === "number") lines.push(`${qty}× ${label}${pc > 0 ? ` (+${money(pc)})` : ""}`);
-      else lines.push(`${label}${pc > 0 ? ` (+${money(pc)})` : ""}`);
+    if (names.length) {
+      lines.push({ group: gName, value: names.join(", ") });
     }
-
-    return { lines, addPerUnitCents };
   }
 
-  return { lines: [], addPerUnitCents: 0 };
+  return { lines, totalExtrasCents };
 }
 
-function renderExtrasUnderItem(extras) {
-  const { lines } = parseExtrasGroups(extras);
+function renderExtrasUnderItem(extrasJson) {
+  const { lines } = parseExtrasGroups(extrasJson);
   if (!lines.length) return null;
 
   return (
     <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
-      {lines.map((t, idx) => (
+      {lines.map((l, idx) => (
         <div key={idx} style={{ fontSize: 12, color: "#555" }}>
-          • {t}
+          • <b>{l.group}:</b> {l.value}
         </div>
       ))}
     </div>
@@ -147,32 +118,24 @@ function renderExtrasUnderItem(extras) {
 }
 
 function itemTotalCents(it) {
-  const base = Number(it?.unit_price_cents || 0);
   const qty = Number(it?.qty || 0);
-  const { addPerUnitCents } = parseExtrasGroups(it?.extras);
-  return (base + addPerUnitCents) * qty;
+  const base = Number(it?.unit_price_cents || 0) * qty;
+
+  // extrasJson total is “per item instance”, so multiply by qty
+  const { totalExtrasCents } = parseExtrasGroups(it?.extras);
+  const extrasTotal = totalExtrasCents * qty;
+
+  return base + extrasTotal;
 }
 
 function orderTotalCents(orderItems) {
   const list = Array.isArray(orderItems) ? orderItems : [];
   let total = 0;
 
-  // only count real items; ignore old-style extras line-items to avoid double counting
   for (const it of list) {
-    const isOldExtraLine = Boolean(parseExtraFor(it?.item_notes));
-    if (isOldExtraLine) continue;
-
+    // If it is an OLD “extra line item” via notes, treat as normal item (it has its own unit_price_cents)
     total += itemTotalCents(it);
   }
-
-  // if there are ONLY old-style extras line items (legacy orders), include them as well
-  const hasAnyMain = list.some((x) => !parseExtraFor(x?.item_notes));
-  if (!hasAnyMain) {
-    for (const it of list) {
-      total += Number(it?.unit_price_cents || 0) * Number(it?.qty || 0);
-    }
-  }
-
   return total;
 }
 
@@ -196,7 +159,6 @@ export default function KitchenPage() {
   async function ensureSession() {
     const { data } = await supabase.auth.getSession();
     if (data?.session) return data.session;
-
     const refreshed = await supabase.auth.refreshSession();
     return refreshed?.data?.session || null;
   }
@@ -248,7 +210,6 @@ export default function KitchenPage() {
 
     if (soundOn) {
       const seen = seenQueuedRef.current;
-
       for (const o of nextOrders) {
         if (String(o.status || "").toLowerCase() === "queued" && !seen.has(o.id)) {
           initSound();
@@ -256,7 +217,6 @@ export default function KitchenPage() {
           seen.add(o.id);
         }
       }
-
       for (const id of Array.from(seen)) {
         const stillQueued = nextOrders.some((o) => o.id === id && String(o.status || "").toLowerCase() === "queued");
         if (!stillQueued) seen.delete(id);
@@ -473,9 +433,7 @@ export default function KitchenPage() {
 
             <div style={{ display: "grid", gap: 10 }}>
               {(grouped.get(st) || []).map((o) => {
-                const groupedItems = groupItemsWithOldExtras(o.order_items || []);
                 const total = orderTotalCents(o.order_items || []);
-
                 return (
                   <div key={o.id} style={{ border: "1px solid #f0f0f0", borderRadius: 12, padding: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
@@ -484,54 +442,54 @@ export default function KitchenPage() {
                           #{o.order_number} • {o.order_type === "collection" ? "Collection" : "Dine-in"}
                         </div>
                         <div style={{ color: "#666" }}>{o.customer_name}</div>
+                        {o.customer_phone ? <div style={{ color: "#666", fontSize: 12 }}>Tel: {o.customer_phone}</div> : null}
                       </div>
 
                       <div style={{ textAlign: "right" }}>
                         <div style={{ color: "#666", fontSize: 12 }}>{new Date(o.created_at).toLocaleTimeString()}</div>
-                        <div style={{ marginTop: 4, fontWeight: 900 }}>Total: {money(total)}</div>
+                        <div style={{ marginTop: 6, fontWeight: 950 }}>{money(total)}</div>
+                        <div style={{ color: "#666", fontSize: 12 }}>Order total</div>
                       </div>
                     </div>
 
                     <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                      {groupedItems.map((it) => {
-                        const isUnmatchedOldExtra = Boolean(parseExtraFor(it.item_notes));
-                        const lineTotal = isUnmatchedOldExtra
-                          ? Number(it.unit_price_cents || 0) * Number(it.qty || 0)
-                          : itemTotalCents(it);
+                      {groupItemsWithExtras(o.order_items || []).map((it) => {
+                        const isUnmatchedExtra = Boolean(parseExtraFor(it.item_notes));
+                        const lineTotal = itemTotalCents(it);
 
                         return (
                           <div key={it.id} style={{ display: "grid", gap: 6 }}>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                               <div>
-                                <b>{it.qty}×</b> {it.name || (isUnmatchedOldExtra ? "Extra" : "")}
+                                <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
 
-                                {/* normal note */}
-                                {it.item_notes && !isUnmatchedOldExtra ? (
+                                {it.item_notes && !isUnmatchedExtra ? (
                                   <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
                                 ) : null}
 
-                                {/* ✅ NEW jsonb modifiers under item */}
-                                {!isUnmatchedOldExtra ? renderExtrasUnderItem(it.extras) : null}
+                                {/* ✅ NEW jsonb extras (Cooking, Add-ons, etc) */}
+                                {renderExtrasUnderItem(it.extras)}
 
-                                {/* unmatched old extras from old approach */}
-                                {isUnmatchedOldExtra ? (
-                                  <div style={{ color: "#6b7280", fontSize: 12 }}>{it.item_notes}</div>
-                                ) : null}
+                                {/* unmatched extras from old approach */}
+                                {isUnmatchedExtra ? <div style={{ color: "#6b7280", fontSize: 12 }}>{it.item_notes}</div> : null}
                               </div>
 
-                              <div style={{ color: "#111", fontSize: 12, fontWeight: 900 }}>{money(lineTotal)}</div>
+                              <div style={{ textAlign: "right" }}>
+                                <div style={{ color: "#666", fontSize: 12 }}>{money(lineTotal)}</div>
+                                <div style={{ color: "#9ca3af", fontSize: 11 }}>line total</div>
+                              </div>
                             </div>
 
                             {/* old approach nested extras */}
-                            {Array.isArray(it.__oldExtras) && it.__oldExtras.length > 0 ? (
+                            {Array.isArray(it.__extras) && it.__extras.length > 0 ? (
                               <div style={{ marginLeft: 14, display: "grid", gap: 6 }}>
-                                {it.__oldExtras.map((ex) => (
+                                {it.__extras.map((ex) => (
                                   <div key={ex.id} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                                     <div style={{ color: "#111" }}>
                                       <span style={{ opacity: 0.7 }}>↳</span> <b>{ex.qty}×</b> {ex.name}
                                     </div>
                                     <div style={{ color: "#666", fontSize: 12 }}>
-                                      {money((ex.unit_price_cents || 0) * (ex.qty || 0))}
+                                      {money(itemTotalCents(ex))}
                                     </div>
                                   </div>
                                 ))}
