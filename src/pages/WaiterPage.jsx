@@ -7,6 +7,10 @@ import { ding, initSound } from "../lib/sound";
 const COLUMNS = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready", "awaiting_payment"];
 
+function money(cents) {
+  return `R${(Number(cents || 0) / 100).toFixed(2)}`;
+}
+
 function withTimeout(promise, ms, message = "Request timed out. Please try again.") {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -52,10 +56,6 @@ function overdueCardStyle(mins) {
   return { borderColor: "#e5e5e5", background: "white" };
 }
 
-function money(cents) {
-  return `R${(cents / 100).toFixed(2)}`;
-}
-
 /** ✅ OLD fallback (extras were separate order_items with "EXTRA FOR:") */
 function parseExtraFor(note) {
   const s = String(note || "").trim();
@@ -63,8 +63,28 @@ function parseExtraFor(note) {
   if (!s.toUpperCase().startsWith(prefix)) return null;
   return s.slice(prefix.length).trim();
 }
+function normName(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, "");
+}
+function findBestParentIndex(mains, parentName) {
+  const p = normName(parentName);
+  if (!p) return -1;
 
-function groupItemsWithExtras(orderItems) {
+  for (let i = 0; i < mains.length; i++) {
+    if (normName(mains[i].name) === p) return i;
+  }
+  for (let i = 0; i < mains.length; i++) {
+    const m = normName(mains[i].name);
+    if (!m) continue;
+    if (m.includes(p) || p.includes(m)) return i;
+  }
+  return -1;
+}
+function groupItemsWithOldExtras(orderItems) {
   const list = Array.isArray(orderItems) ? orderItems : [];
   const mains = [];
   const extras = [];
@@ -72,132 +92,116 @@ function groupItemsWithExtras(orderItems) {
   for (const it of list) {
     const parentName = parseExtraFor(it.item_notes);
     if (parentName) extras.push({ ...it, __parentName: parentName });
-    else mains.push({ ...it, __extras: [] });
-  }
-
-  const byName = new Map();
-  for (const m of mains) {
-    const key = String(m.name || "").trim().toLowerCase();
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(m);
+    else mains.push({ ...it, __oldExtras: [] });
   }
 
   const unmatched = [];
   for (const ex of extras) {
-    const key = String(ex.__parentName || "").trim().toLowerCase();
-    const candidates = byName.get(key);
-    if (!candidates || candidates.length === 0) unmatched.push(ex);
-    else candidates[0].__extras.push(ex);
+    const idx = findBestParentIndex(mains, ex.__parentName);
+    if (idx >= 0) mains[idx].__oldExtras.push(ex);
+    else unmatched.push(ex);
   }
 
-  return [...mains, ...unmatched].map((x) => ({
-    ...x,
-    __extras: Array.isArray(x.__extras) ? x.__extras : [],
-  }));
+  return [...mains, ...unmatched];
 }
 
-/** ✅ NEW: robust jsonb extras renderer for order_items.extras */
-function safeJson(v) {
-  try {
-    if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v === "string" && v.trim() === "") return null;
-    if (typeof v === "string") return JSON.parse(v);
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function asArray(v) {
+/** ✅ NEW modifiers parsing: { groups:[{name, selected:[{name, price_cents}]}]} */
+function safeArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
-function normalizeExtrasToGroups(extras) {
-  const obj = safeJson(extras);
+function parseExtrasGroups(extras) {
+  if (!extras) return { lines: [], addPerUnitCents: 0 };
 
-  if (Array.isArray(obj)) {
-    const flat = [];
-    for (const entry of obj) {
-      if (entry?.groups && Array.isArray(entry.groups)) flat.push(...entry.groups);
-      else flat.push(entry);
+  if (typeof extras === "object" && !Array.isArray(extras) && Array.isArray(extras.groups)) {
+    const groups = safeArray(extras.groups);
+    const lines = [];
+    let addPerUnitCents = 0;
+
+    for (const g of groups) {
+      const gName = String(g?.name || "").trim() || "Option";
+      const selected = safeArray(g?.selected);
+      if (selected.length === 0) continue;
+
+      const parts = selected.map((s) => {
+        const n = String(s?.name || "").trim() || "Selected";
+        const pc = Number(s?.price_cents || 0);
+        if (pc > 0) {
+          addPerUnitCents += pc;
+          return `${n} (+${money(pc)})`;
+        }
+        return n;
+      });
+
+      lines.push(`${gName}: ${parts.join(", ")}`);
     }
-    return flat
-      .map((g) => ({
-        name: String(g?.name || g?.label || "Extras"),
-        selected: asArray(g?.selected),
-      }))
-      .filter((g) => g.selected.length > 0);
+
+    return { lines, addPerUnitCents };
   }
 
-  if (obj && Array.isArray(obj.groups)) {
-    return obj.groups
-      .map((g) => ({
-        name: String(g?.name || g?.label || "Extras"),
-        selected: asArray(g?.selected),
-      }))
-      .filter((g) => g.selected.length > 0);
+  if (Array.isArray(extras)) {
+    const lines = [];
+    let addPerUnitCents = 0;
+
+    for (const ex of extras) {
+      const label = String(ex?.label ?? ex?.name ?? "Extra").trim();
+      const value = String(ex?.value ?? ex?.choice ?? "").trim();
+      const pc = Number(ex?.price_cents || 0);
+      const qty = ex?.qty ?? ex?.quantity;
+
+      if (pc > 0) addPerUnitCents += pc;
+
+      if (value) lines.push(`${label}: ${value}${pc > 0 ? ` (+${money(pc)})` : ""}`);
+      else if (typeof qty === "number") lines.push(`${qty}× ${label}${pc > 0 ? ` (+${money(pc)})` : ""}`);
+      else lines.push(`${label}${pc > 0 ? ` (+${money(pc)})` : ""}`);
+    }
+
+    return { lines, addPerUnitCents };
   }
 
-  if (obj && obj.selected && Array.isArray(obj.selected)) {
-    return [
-      {
-        name: String(obj?.name || obj?.label || "Extras"),
-        selected: asArray(obj.selected),
-      },
-    ].filter((g) => g.selected.length > 0);
-  }
-
-  return [];
+  return { lines: [], addPerUnitCents: 0 };
 }
 
-function renderExtrasJson(extras) {
-  const groups = normalizeExtrasToGroups(extras);
-  if (groups.length === 0) return null;
+function renderExtrasUnderItem(extras) {
+  const { lines } = parseExtrasGroups(extras);
+  if (!lines.length) return null;
 
   return (
-    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 8 }}>
-      {groups.map((g, gi) => (
-        <div key={gi} style={{ display: "grid", gap: 4 }}>
-          <div style={{ fontSize: 12, fontWeight: 900, color: "#6b7280" }}>{g.name}</div>
-
-          <div style={{ display: "grid", gap: 4 }}>
-            {g.selected.map((s, si) => {
-              const name = s?.name || s?.label || "Option";
-              const price = Number(s?.price_cents || 0);
-              const qty = Number.isFinite(Number(s?.qty)) ? Number(s.qty) : null;
-
-              return (
-                <div
-                  key={si}
-                  style={{
-                    fontSize: 12,
-                    color: "#555",
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 10,
-                  }}
-                >
-                  <div>
-                    <span style={{ opacity: 0.7 }}>↳</span>{" "}
-                    {qty && qty > 1 ? (
-                      <>
-                        <b>{qty}×</b> {name}
-                      </>
-                    ) : (
-                      name
-                    )}
-                  </div>
-
-                  {price > 0 ? <div style={{ color: "#666" }}>{money(price)}</div> : null}
-                </div>
-              );
-            })}
-          </div>
+    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
+      {lines.map((t, idx) => (
+        <div key={idx} style={{ fontSize: 12, color: "#555" }}>
+          • {t}
         </div>
       ))}
     </div>
   );
+}
+
+function itemTotalCents(it) {
+  const base = Number(it?.unit_price_cents || 0);
+  const qty = Number(it?.qty || 0);
+  const { addPerUnitCents } = parseExtrasGroups(it?.extras);
+  return (base + addPerUnitCents) * qty;
+}
+
+function orderTotalCents(orderItems) {
+  const list = Array.isArray(orderItems) ? orderItems : [];
+  let total = 0;
+
+  for (const it of list) {
+    const isOldExtraLine = Boolean(parseExtraFor(it?.item_notes));
+    if (isOldExtraLine) continue;
+    total += itemTotalCents(it);
+  }
+
+  const hasAnyMain = list.some((x) => !parseExtraFor(x?.item_notes));
+  if (!hasAnyMain) {
+    for (const it of list) {
+      total += Number(it?.unit_price_cents || 0) * Number(it?.qty || 0);
+    }
+  }
+
+  return total;
 }
 
 export default function WaiterPage() {
@@ -454,6 +458,8 @@ export default function WaiterPage() {
 
   function OrderCard({ o }) {
     const style = overdueCardStyle(o.mins);
+    const groupedItems = groupItemsWithOldExtras(o.order_items || []);
+    const total = orderTotalCents(o.order_items || []);
 
     return (
       <div style={{ border: `1px solid ${style.borderColor}`, background: style.background, borderRadius: 14, padding: 12 }}>
@@ -468,32 +474,42 @@ export default function WaiterPage() {
           <div style={{ textAlign: "right" }}>
             <div style={chipStyle(o.status)}>{statusLabel(o.status)}</div>
             <div style={{ color: "#666", fontSize: 12, marginTop: 6 }}>{o.mins} min ago</div>
+            <div style={{ marginTop: 6, fontWeight: 950 }}>Total: {money(total)}</div>
           </div>
         </div>
 
         <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-          {groupItemsWithExtras(o.order_items || []).map((it) => {
-            const isUnmatchedExtra = Boolean(parseExtraFor(it.item_notes));
+          {groupedItems.map((it) => {
+            const isUnmatchedOldExtra = Boolean(parseExtraFor(it.item_notes));
+            const lineTotal = isUnmatchedOldExtra
+              ? Number(it.unit_price_cents || 0) * Number(it.qty || 0)
+              : itemTotalCents(it);
 
             return (
               <div key={it.id} style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontSize: 13 }}>
-                  <b>{it.qty}×</b> {it.name || (isUnmatchedExtra ? "Extra" : "")}
+                <div style={{ fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <div>
+                    <b>{it.qty}×</b> {it.name || (isUnmatchedOldExtra ? "Extra" : "")}
 
-                  {it.item_notes && !isUnmatchedExtra ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
+                    {it.item_notes && !isUnmatchedOldExtra ? <div style={{ color: "#666" }}>Note: {it.item_notes}</div> : null}
 
-                  {/* ✅ jsonb extras + cooking */}
-                  {renderExtrasJson(it.extras)}
+                    {/* ✅ NEW jsonb modifiers */}
+                    {!isUnmatchedOldExtra ? renderExtrasUnderItem(it.extras) : null}
 
-                  {isUnmatchedExtra ? <div style={{ color: "#6b7280" }}>{it.item_notes}</div> : null}
+                    {isUnmatchedOldExtra ? <div style={{ color: "#6b7280" }}>{it.item_notes}</div> : null}
+                  </div>
+
+                  <div style={{ fontWeight: 900 }}>{money(lineTotal)}</div>
                 </div>
 
-                {/* old approach nested extras */}
-                {Array.isArray(it.__extras) && it.__extras.length > 0 ? (
+                {Array.isArray(it.__oldExtras) && it.__oldExtras.length > 0 ? (
                   <div style={{ marginLeft: 14, display: "grid", gap: 6 }}>
-                    {it.__extras.map((ex) => (
-                      <div key={ex.id} style={{ fontSize: 13 }}>
-                        <span style={{ opacity: 0.7 }}>↳</span> <b>{ex.qty}×</b> {ex.name}
+                    {it.__oldExtras.map((ex) => (
+                      <div key={ex.id} style={{ fontSize: 13, display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div>
+                          <span style={{ opacity: 0.7 }}>↳</span> <b>{ex.qty}×</b> {ex.name}
+                        </div>
+                        <div style={{ color: "#666", fontSize: 12 }}>{money((ex.unit_price_cents || 0) * (ex.qty || 0))}</div>
                       </div>
                     ))}
                   </div>
