@@ -752,6 +752,7 @@ export default function OrderPage() {
         });
       }
     }
+    console.log("PLACE ORDER PAYLOAD:", payloadItems);
 
     setIsPlacing(true);
     console.log("payloadItems", payloadItems);
