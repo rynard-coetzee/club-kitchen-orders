@@ -865,7 +865,7 @@ export default function OrderPage() {
             <input
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              placeholder="Telephone (optional)"
+              placeholder="Telephone"
               style={{
                 padding: 10,
                 borderRadius: 12,
