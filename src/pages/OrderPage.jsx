@@ -754,6 +754,7 @@ export default function OrderPage() {
     }
 
     setIsPlacing(true);
+    console.log("payloadItems", payloadItems);
     const { data, error } = await supabase.rpc("place_order", {
       p_order_type: orderType,
       p_customer_name: name.trim(),
