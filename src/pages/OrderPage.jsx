@@ -82,6 +82,7 @@ export default function OrderPage() {
   // }
   const [cart, setCart] = useState([]);
   const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
   const [orderType, setOrderType] = useState("dine_in"); // dine_in | collection
 
   const [msg, setMsg] = useState("");
@@ -756,6 +757,7 @@ export default function OrderPage() {
     const { data, error } = await supabase.rpc("place_order", {
       p_order_type: orderType,
       p_customer_name: name.trim(),
+      p_customer_phone: phone.trim(), // ✅ optional
       p_items: payloadItems,
     });
     setIsPlacing(false);
@@ -776,6 +778,7 @@ export default function OrderPage() {
     lastReadyOrderIdRef.current = null;
 
     setCart([]);
+    setPhone("");
     setMsg(`Order sent! Your order number is #${row.order_number}`);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -786,6 +789,8 @@ export default function OrderPage() {
     setOrderData(null);
     setCart([]);
     setMsg("");
+    setPhone("");
+    setName("");
     setErr("");
     setSearch("");
     lastReadyOrderIdRef.current = null;
@@ -857,7 +862,17 @@ export default function OrderPage() {
                 width: 240,
               }}
             />
-
+            <input
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              placeholder="Telephone (optional)"
+              style={{
+                padding: 10,
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                width: 240,
+              }}
+            />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
