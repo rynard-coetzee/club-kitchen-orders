@@ -66,7 +66,7 @@ export default function ReportsPage() {
   const [fromDate, setFromDate] = useState(() => toLocalInputValue(addDays(new Date(), -7)));
   const [toDate, setToDate] = useState(() => toLocalInputValue(new Date())); // inclusive UI
 
-  const [statusFilter, setStatusFilter] = useState("completed"); // completed | active | all
+  const [statusFilter, setStatusFilter] = useState("all"); // completed | active | all
   const [typeFilter, setTypeFilter] = useState("all"); // all | dine_in | collection
   const [search, setSearch] = useState("");
 
@@ -195,11 +195,17 @@ export default function ReportsPage() {
   const filtered = useMemo(() => {
     let list = [...orders];
 
-    if (statusFilter === "completed") {
+    if (statusFilter === "paid") {
+      list = list.filter((o) => o.status === "paid");
+    } else if (statusFilter === "completed") {
       list = list.filter((o) => o.status === "completed");
     } else if (statusFilter === "active") {
-      list = list.filter((o) => ["queued", "accepted", "preparing", "ready"].includes(o.status));
+      list = list.filter((o) =>
+        ["queued", "accepted", "preparing", "ready", "awaiting_payment"].includes(o.status)
+      );
     }
+    // statusFilter === "all" -> no filtering
+
 
     if (typeFilter !== "all") {
       list = list.filter((o) => o.order_type === typeFilter);
@@ -399,6 +405,7 @@ export default function ReportsPage() {
 
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}>
             <option value="completed">Completed only</option>
+            <option value="paid">Paid</option>
             <option value="active">Active only</option>
             <option value="all">All statuses</option>
           </select>
