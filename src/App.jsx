@@ -4,6 +4,8 @@ import KitchenPage from "./pages/KitchenPage";
 import WaiterPage from "./pages/WaiterPage";
 import LoginPage from "./pages/LoginPage";
 import ReportsPage from "./pages/ReportsPage";
+import AdminPage from "./pages/AdminPage";
+import RequireRole from "./components/RequireRole";
 
 export default function App() {
   return (
@@ -11,10 +13,22 @@ export default function App() {
       <Route path="/" element={<Navigate to="/order" replace />} />
       <Route path="/order" element={<OrderPage />} />
       <Route path="/login" element={<LoginPage />} />
+
       <Route path="/kitchen" element={<KitchenPage />} />
       <Route path="/waiter" element={<WaiterPage />} />
-      <Route path="*" element={<div style={{ padding: 16 }}>Not found</div>} />
       <Route path="/reports" element={<ReportsPage />} />
+
+      {/* Admin route (protected) */}
+      <Route
+        path="/admin"
+        element={
+          <RequireRole allow={["admin"]}>
+            <AdminPage />
+          </RequireRole>
+        }
+      />
+
+      <Route path="*" element={<div style={{ padding: 16 }}>Not found</div>} />
     </Routes>
   );
 }

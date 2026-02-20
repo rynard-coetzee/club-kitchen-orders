@@ -4,8 +4,6 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
-const [myRole, setMyRole] = useState(null);
-
 function money(cents) {
   return `R${(Number(cents || 0) / 100).toFixed(2)}`;
 }
@@ -169,11 +167,8 @@ export default function KitchenPage() {
     const { data: role, error } = await supabase.rpc("get_my_role");
     if (error) return { ok: false, reason: "role_error" };
     const r = String(role || "").trim().toLowerCase();
-    setMyRole(r);
-    // ✅ allow admins into kitchen page
-    if (r !== "kitchen" && r !== "admin") return { ok: false, reason: "not_kitchen", role: r };
-
-    return { ok: false, reason: "not_kitchen", role: r };
+    if (r !== "kitchen") return { ok: false, reason: "not_kitchen", role: r };
+    return { ok: true, role: r };
   }
 
   async function load() {
@@ -397,15 +392,7 @@ export default function KitchenPage() {
           >
             Reports
           </button>
-          {myRole === "admin" && (
-            <button
-              type="button"
-              onClick={() => nav("/admin")}
-              style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
-            >
-              Admin
-            </button>
-          )}
+
           <button
             type="button"
             onClick={() => {
