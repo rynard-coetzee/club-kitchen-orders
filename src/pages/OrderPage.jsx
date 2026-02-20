@@ -74,9 +74,15 @@ export default function OrderPage() {
 
   // ✅ NEW: refs so we can scroll/focus on validation errors
   const topRef = useRef(null);
-  const nameInputRef = useRef(null);
-
+  const nameInputRef = useRef(null);															  
   const [menu, setMenu] = useState([]);
+  // cart line:
+  // {
+  //   menu_item_id, name, price_cents, qty, item_notes,
+  //   extras: [{menu_item_id,name,price_cents,qty}],
+  //   modifiers?: { [group_id]: [modifier_item_id,...] },
+  //   extras_payload?: { groups:[{group_id,name,selected:[{id,name,price_cents}]}] }
+  // }
   const [cart, setCart] = useState([]);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -88,8 +94,7 @@ export default function OrderPage() {
   const [isMenuLoading, setIsMenuLoading] = useState(false);
 
   // ✅ NEW: track submit attempt to highlight required fields
-  const [submitAttempted, setSubmitAttempted] = useState(false);
-
+  const [submitAttempted, setSubmitAttempted] = useState(false);															   
   // status tracking (saved per device)
   const [activeOrder, setActiveOrder] = useState(null); // {order_id, guest_order_token, order_number}
   const [orderData, setOrderData] = useState(null);
@@ -351,7 +356,6 @@ export default function OrderPage() {
       }
     });
   }
-
   function addExtraToParent(parentIdx, extraItem) {
     setCart((prev) => {
       const next = prev.map(ensureLineExtras);
@@ -389,11 +393,11 @@ export default function OrderPage() {
   }
 
   // ==========================
-  // ✅ Modifiers (block immediately)
+  // ✅ NEW: Modifiers (block immediately)
   // ==========================
 
   const modItemById = useMemo(() => {
-    const map = new Map();
+    const map = new Map(); // modifier_item_id -> {id,name,price_cents, group_id, group_name}
     for (const g of modGroups || []) {
       for (const it of g.items || []) {
         map.set(it.id, { ...it, group_id: g.group_id, group_name: g.group_name });
@@ -425,12 +429,16 @@ export default function OrderPage() {
       const has = cur.includes(itemId);
 
       if (has) return { ...prev, [groupId]: cur.filter((x) => x !== itemId) };
+
       if (cur.length >= maxSelect) return prev;
 
       return { ...prev, [groupId]: [...cur, itemId] };
     });
   }
 
+  // ✅ fallback rules if your RPC doesn't provide min/max:
+  // - "cook" group: required single select
+  // - other groups: optional, max 3
   function groupRules(g) {
     const name = catLower(g?.group_name);
     const hasMin = g?.min_select != null || g?.is_required != null;
@@ -445,10 +453,11 @@ export default function OrderPage() {
         maxSel = 1;
       } else {
         minSel = 0;
-        maxSel = 3;
+        maxSel = 3; // ✅ as requested
       }
     }
 
+    // also handle if you only provided one side
     if (!hasMax) {
       if (name.includes("cook") || name.includes("cooking") || name.includes("done")) maxSel = 1;
       else maxSel = 3;
@@ -517,6 +526,7 @@ export default function OrderPage() {
     setCart((prev) => {
       const next = prev.map(ensureLineExtras);
 
+      // Different modifier choices = different cart lines
       const idx = next.findIndex(
         (x) =>
           x.menu_item_id === item.id &&
@@ -540,7 +550,7 @@ export default function OrderPage() {
           item_notes: "",
           extras: [],
           modifiers: modSelected,
-          extras_payload: extrasPayload,
+          extras_payload: extrasPayload, // ✅ goes into order_items.extras if your place_order saves it
         },
       ];
     });
@@ -564,9 +574,11 @@ export default function OrderPage() {
 
       const groups = Array.isArray(data) ? data : data || [];
 
+      // If no groups, close modal and add normally
       if (!groups.length) {
         closeModifierModal();
 
+        // normal add (no modifiers)
         let newIdx = null;
         setCart((prev) => {
           const next = prev.map(ensureLineExtras);
@@ -595,6 +607,7 @@ export default function OrderPage() {
           ];
         });
 
+        // optional old extras prompt
         queueMicrotask(() => {
           if (typeof newIdx === "number") openExtrasPickerForParent(newIdx);
         });
@@ -604,6 +617,7 @@ export default function OrderPage() {
 
       setModGroups(groups);
     } catch (e) {
+      // If RPC fails, allow normal add (don’t block ordering)
       closeModifierModal();
 
       let newIdx = null;
@@ -644,6 +658,7 @@ export default function OrderPage() {
     }
   }
 
+  // ✅ main add: block immediately with modifier modal if needed
   function addMainToCart(item) {
     openModifierModalForMenuItem(item);
   }
@@ -653,7 +668,7 @@ export default function OrderPage() {
     setMsg("");
 
     if (cart.length === 0) {
-      showValidationError("Please add a main item first, then choose extras.");
+      setErr("Please add a main item first, then choose extras.");
       return;
     }
 
@@ -676,7 +691,7 @@ export default function OrderPage() {
     if (!pendingExtra) return;
     const idx = typeof extraTargetIdx === "number" ? extraTargetIdx : null;
     if (idx === null || idx < 0 || idx >= cart.length) {
-      showValidationError("Please choose which item this extra is for.");
+      setErr("Please choose which item this extra is for.");
       return;
     }
 
@@ -744,24 +759,29 @@ export default function OrderPage() {
   async function placeOrder() {
     setErr("");
     setMsg("");
-    setSubmitAttempted(true);
+	setSubmitAttempted(true);
 
     // ✅ NEW: show error + scroll/focus immediately
-    if (!name.trim()) {
-      showValidationError("Please enter your name.", { focusName: true });
+    if (!name.trim()) {						 
+	  showValidationError("Please enter your name.", { focusName: true });
       return;
-    }
+    }			   						
     if (cart.length === 0) {
       showValidationError("Your cart is empty.");
       return;
     }
+	 
 
+    // ✅ Flatten payload:
+    // - main items: include extras_payload (modifiers) in "extras" (if your place_order saves it)
+    // - old extras: still become regular items with note "EXTRA FOR: <parent name>"
     const payloadItems = [];
     for (const line of cart.map(ensureLineExtras)) {
       payloadItems.push({
         menu_item_id: line.menu_item_id,
         qty: line.qty,
         item_notes: line.item_notes || "",
+        // ✅ best place to store steak cooking/add-ons etc
         extras: line.extras_payload || null,
       });
 
@@ -773,8 +793,10 @@ export default function OrderPage() {
         });
       }
     }
+    console.log("PLACE ORDER PAYLOAD:", payloadItems);
 
     setIsPlacing(true);
+    console.log("payloadItems", payloadItems);
     const { data, error } = await supabase.rpc("place_order", {
       p_order_type: orderType,
       p_customer_name: name.trim(),
@@ -787,7 +809,6 @@ export default function OrderPage() {
       showValidationError(error.message);
       return;
     }
-
     const row = Array.isArray(data) ? data[0] : data;
 
     const saved = {
@@ -804,10 +825,8 @@ export default function OrderPage() {
     setCart([]);
     setPhone("");
     setMsg(`Order sent! Your order number is #${row.order_number}`);
-
-    // ✅ clear the "required field highlight" once successful
-    setSubmitAttempted(false);
-
+	// ✅ clear the "required field highlight" once successful
+    setSubmitAttempted(false);														   
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -821,7 +840,7 @@ export default function OrderPage() {
     setName("");
     setErr("");
     setSearch("");
-    setSubmitAttempted(false);
+	setSubmitAttempted(false);						  
     lastReadyOrderIdRef.current = null;
     window.scrollTo({ top: 0, behavior: "smooth" });
     await loadMenu();
@@ -840,8 +859,7 @@ export default function OrderPage() {
     : "Dine-in";
 
   // ✅ NEW: compute if Name should be highlighted
-  const nameHasError = submitAttempted && !name.trim();
-
+  const nameHasError = submitAttempted && !name.trim();											   
   const MenuBlock = (
     <div>
       <div
@@ -883,21 +901,22 @@ export default function OrderPage() {
               <option value="collection">Collection</option>
             </select>
 
-            {/* ✅ UPDATED: highlight name if missing after submit */}
+			{/* ✅ UPDATED: highlight name if missing after submit */}													   
             <input
-              ref={nameInputRef}
+			  ref={nameInputRef}				
               value={name}
-              onChange={(e) => {
+			  onChange={(e) => {
                 setName(e.target.value);
                 // as user types, keep it responsive — error highlight goes away automatically
-              }}
+              }}				
+              onChange={(e) => setName(e.target.value)}
               placeholder="Your name (required)"
               style={{
                 padding: 10,
                 borderRadius: 12,
                 border: nameHasError ? "2px solid #ef4444" : "1px solid #ddd",
-                background: nameHasError ? "#fff1f2" : "white",
-                outline: "none",
+				background: nameHasError ? "#fff1f2" : "white",
+                outline: "none",											   
                 width: 240,
               }}
             />
@@ -925,13 +944,11 @@ export default function OrderPage() {
             />
           </div>
         </div>
-
-        {nameHasError ? (
+		{nameHasError ? (
           <div style={{ marginTop: 8, color: "#b91c1c", fontSize: 12, fontWeight: 800 }}>
             Name is required to submit the order.
           </div>
         ) : null}
-
         <div style={{ marginTop: 12 }}>
           {isMenuLoading ? <div style={{ color: "#666" }}>Loading menu…</div> : null}
           {!isMenuLoading && !err && menu.length === 0 ? <div style={{ color: "#777" }}>Menu is empty.</div> : null}
@@ -1051,7 +1068,7 @@ export default function OrderPage() {
             <button
               type="button"
               onClick={() => {
-                initSound();
+                initSound(); // user gesture
                 const next = !soundOn;
                 setSoundOn(next);
                 localStorage.setItem("patron_sound", next ? "1" : "0");
@@ -1090,6 +1107,7 @@ export default function OrderPage() {
                   <div style={{ fontWeight: 900 }}>{money(x.price_cents * x.qty)}</div>
                 </div>
 
+                {/* ✅ show selected modifiers under item */}
                 {x.extras_payload?.groups?.some((g) => (g.selected || []).length) ? (
                   <div style={{ marginTop: 8, color: "#374151", fontSize: 12 }}>
                     {x.extras_payload.groups
@@ -1226,8 +1244,8 @@ export default function OrderPage() {
   );
 
   return (
-    <div ref={topRef} style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto" }}>
-      {/* ✅ Floating Cart button */}
+    <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto" }}>
+      {/* ✅ Floating Cart button (right side, static) */}
       <button
         type="button"
         onClick={scrollToCart}
@@ -1417,10 +1435,329 @@ export default function OrderPage() {
         Tip: Turn Sound ON (in the cart) to hear a ding when your order becomes READY.
       </div>
 
-      {/* ✅ The rest of your modals remain unchanged... */}
-      {/* (Modifier modal, extras picker modal, extras modal) */}
-      {/* Keep your existing modal code below this point */}
-      {/* ... */}
+      {/* ✅ Modifier modal (BLOCK immediately) */}
+      {modModalOpen && modMenuItem && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={closeModifierModal}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 10000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 720,
+              background: "white",
+              borderRadius: 16,
+              border: "1px solid #eee",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
+              <div style={{ fontSize: 16, fontWeight: 950 }}>Customize: {modMenuItem.name}</div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                Base: <b>{money(modMenuItem.price_cents)}</b> • Add-ons: <b>{money(modifiersPriceCents())}</b>
+              </div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              {modLoading ? <div style={{ color: "#666" }}>Loading options…</div> : null}
+
+              {!modLoading &&
+                (modGroups || []).map((g) => {
+                  const { minSel, maxSel } = groupRules(g);
+                  const chosen = groupSelectedCount(g.group_id);
+                  const isSingle = maxSel === 1;
+
+                  return (
+                    <div key={g.group_id} style={{ borderTop: "1px solid #f1f1f1", paddingTop: 12, marginTop: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+                        <div style={{ fontWeight: 950 }}>
+                          {g.group_name}{" "}
+                          {minSel > 0 ? (
+                            <span style={{ fontSize: 12, color: "#dc2626", fontWeight: 900 }}>(required)</span>
+                          ) : (
+                            <span style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>(optional)</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#666", fontWeight: 800 }}>
+                          {chosen}/{maxSel === 999 ? "∞" : maxSel}
+                        </div>
+                      </div>
+
+                      <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                        {(g.items || []).map((it) => {
+                          const selectedIds = modSelected?.[g.group_id] || [];
+                          const isSelected = selectedIds.includes(it.id);
+
+                          return (
+                            <button
+                              key={it.id}
+                              type="button"
+                              onClick={() => {
+                                setModError("");
+                                if (isSingle) setSingleSelect(g.group_id, it.id);
+                                else toggleMultiSelect(g.group_id, it.id, maxSel);
+                              }}
+                              style={{
+                                textAlign: "left",
+                                padding: 12,
+                                borderRadius: 14,
+                                border: "1px solid #e5e5e5",
+                                background: isSelected ? "#111" : "white",
+                                color: isSelected ? "white" : "#111",
+                                cursor: "pointer",
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                alignItems: "center",
+                                fontWeight: 900,
+                              }}
+                            >
+                              <span>{it.name}</span>
+                              <span style={{ opacity: isSelected ? 0.9 : 0.8 }}>
+                                {cents(it.price_cents) > 0 ? `+ ${money(it.price_cents)}` : "Included"}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {!isSingle && (
+                        <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+                          Choose up to <b>{maxSel}</b>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+              {modError ? (
+                <div style={{ marginTop: 12, background: "#ffe5e5", border: "1px solid #fecaca", padding: 10, borderRadius: 12 }}>
+                  <b>Error:</b> {modError}
+                </div>
+              ) : null}
+            </div>
+
+            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={closeModifierModal}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                disabled={modLoading}
+                onClick={addItemWithModifiersToCart}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "#2563eb",
+                  color: "white",
+                  fontWeight: 950,
+                  cursor: "pointer",
+                  opacity: modLoading ? 0.6 : 1,
+                }}
+              >
+                Add to cart • {money(cents(modMenuItem.price_cents) + modifiersPriceCents())}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ “Add extras?” picker modal (after adding main item) */}
+      {extrasPickerOpen && typeof extrasPickerParentIdx === "number" && cart[extrasPickerParentIdx] && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={closeExtrasPicker}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 640,
+              background: "white",
+              borderRadius: 16,
+              border: "1px solid #eee",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
+              <div style={{ fontSize: 16, fontWeight: 950 }}>Add Extras?</div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>
+                Select extras for <b>{cart[extrasPickerParentIdx].name}</b>
+              </div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              {extrasItems.length === 0 ? (
+                <div style={{ color: "#666" }}>No extras found on the menu.</div>
+              ) : (
+                <div style={{ display: "grid", gap: 10 }}>
+                  {extrasItems.map((ex) => (
+                    <button
+                      key={ex.id}
+                      type="button"
+                      onClick={() => addExtraToParent(extrasPickerParentIdx, ex)}
+                      style={{
+                        textAlign: "left",
+                        padding: 12,
+                        borderRadius: 14,
+                        border: "1px solid #eee",
+                        background: "#fafafa",
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: 10,
+                        alignItems: "center",
+                        fontWeight: 900,
+                      }}
+                    >
+                      <span>{ex.name}</span>
+                      <span>{money(ex.price_cents)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ marginTop: 12, color: "#666", fontSize: 12 }}>
+                Tip: You can also add/remove extras later in the cart.
+              </div>
+            </div>
+
+            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={closeExtrasPicker}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ Existing “choose which item this extra is for” modal (when tapping an extra item directly) */}
+      {extrasModalOpen && pendingExtra && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={closeExtrasModal}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 9999,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              background: "white",
+              borderRadius: 16,
+              border: "1px solid #eee",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: 14, borderBottom: "1px solid #eee" }}>
+              <div style={{ fontSize: 16, fontWeight: 950 }}>Add Extra</div>
+              <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>Choose which item this extra is for.</div>
+            </div>
+
+            <div style={{ padding: 14 }}>
+              <div style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fafafa" }}>
+                <div style={{ fontWeight: 950 }}>{pendingExtra.name}</div>
+                <div style={{ marginTop: 4, color: "#666", fontSize: 13 }}>{money(pendingExtra.price_cents)}</div>
+              </div>
+
+              <div style={{ marginTop: 12, fontWeight: 900, fontSize: 13 }}>Select parent item:</div>
+
+              <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                {cart.map((line, idx) => (
+                  <button
+                    key={`${line.menu_item_id}-${idx}`}
+                    type="button"
+                    onClick={() => setExtraTargetIdx(idx)}
+                    style={{
+                      textAlign: "left",
+                      padding: 12,
+                      borderRadius: 14,
+                      border: "1px solid #e5e5e5",
+                      background: extraTargetIdx === idx ? "#111" : "white",
+                      color: extraTargetIdx === idx ? "white" : "#111",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 10,
+                      alignItems: "center",
+                    }}
+                  >
+                    <span>
+                      {line.name} <span style={{ opacity: 0.75, fontWeight: 800 }}>(x{line.qty})</span>
+                    </span>
+                    <span style={{ opacity: 0.75, fontWeight: 800 }}>{extraTargetIdx === idx ? "Selected" : "Select"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={closeExtrasModal}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={confirmAddExtra}
+                style={{ padding: "10px 12px", borderRadius: 12, border: "none", background: "#2563eb", color: "white", fontWeight: 950, cursor: "pointer" }}
+              >
+                Add to selected item
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
