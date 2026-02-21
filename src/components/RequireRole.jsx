@@ -3,23 +3,19 @@ import { Navigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 
 export default function RequireRole({ allow = [], children }) {
-  const [loading, setLoading] = useState(true);
-  const [ok, setOk] = useState(false);
+  const [state, setState] = useState({ loading: true, ok: false, redirectTo: "/login" });
 
   useEffect(() => {
     let cancelled = false;
 
     async function run() {
-      setLoading(true);
+      setState({ loading: true, ok: false, redirectTo: "/login" });
 
       const { data } = await supabase.auth.getSession();
       const session = data?.session;
 
       if (!session?.user) {
-        if (!cancelled) {
-          setOk(false);
-          setLoading(false);
-        }
+        if (!cancelled) setState({ loading: false, ok: false, redirectTo: "/login" });
         return;
       }
 
@@ -27,14 +23,22 @@ export default function RequireRole({ allow = [], children }) {
       if (cancelled) return;
 
       if (error) {
-        setOk(false);
-        setLoading(false);
+        setState({ loading: false, ok: false, redirectTo: "/login" });
         return;
       }
 
       const r = String(role || "").trim().toLowerCase();
-      setOk(allow.includes(r));
-      setLoading(false);
+
+      if (allow.includes(r)) {
+        setState({ loading: false, ok: true, redirectTo: "/login" });
+        return;
+      }
+
+      // ✅ If logged in but wrong page, send them where they belong
+      if (r === "admin") setState({ loading: false, ok: false, redirectTo: "/admin" });
+      else if (r === "kitchen") setState({ loading: false, ok: false, redirectTo: "/kitchen" });
+      else if (r === "waiter") setState({ loading: false, ok: false, redirectTo: "/waiter" });
+      else setState({ loading: false, ok: false, redirectTo: "/login" });
     }
 
     run();
@@ -43,8 +47,8 @@ export default function RequireRole({ allow = [], children }) {
     };
   }, [allow]);
 
-  if (loading) return <div style={{ padding: 16 }}>Loading…</div>;
-  if (!ok) return <Navigate to="/login" replace />;
+  if (state.loading) return <div style={{ padding: 16 }}>Loading…</div>;
+  if (!state.ok) return <Navigate to={state.redirectTo} replace />;
 
   return children;
 }
