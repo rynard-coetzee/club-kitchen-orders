@@ -179,12 +179,14 @@ export default function WaiterPage() {
 
   async function ensureWaiterRole() {
     const { data: role, error } = await supabase.rpc("get_my_role");
-    if (error) return { ok: false, reason: "role_error" };
+    if (error) return { ok: false, reason: "role_error", role: null };
+
     const r = String(role || "").trim().toLowerCase();
     setMyRole(r);
 
-    // ✅ allow admins into waiter page
-    if (r !== "waiter" && r !== "admin") return { ok: false, reason: "not_waiter", role: r };
+    if (r === "waiter") return { ok: true, role: r };
+
+    return { ok: false, reason: "not_waiter", role: r };
   }
 
   useEffect(() => {
@@ -211,8 +213,16 @@ export default function WaiterPage() {
 
     if (!roleRes.ok) {
       stopPolling();
-      if (roleRes.reason === "not_waiter") nav("/kitchen", { replace: true });
-      else nav("/login", { replace: true });
+
+      const r = String(roleRes.role || "").toLowerCase();
+
+      if (r === "admin") {
+        nav("/admin", { replace: true });
+        return;
+      }
+
+      // don't bounce between staff pages
+      nav("/login", { replace: true });
       return;
     }
 
