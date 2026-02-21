@@ -166,12 +166,13 @@ export default function KitchenPage() {
 
   async function ensureKitchenRole() {
     const { data: role, error } = await supabase.rpc("get_my_role");
-    if (error) return { ok: false, reason: "role_error" };
+    if (error) return { ok: false, reason: "role_error", role: null };
+
     const r = String(role || "").trim().toLowerCase();
     setMyRole(r);
-    // ✅ allow admins into kitchen page
-    if (r !== "kitchen" && r !== "admin") return { ok: false, reason: "not_kitchen", role: r };
 
+    if (r === "kitchen") return { ok: true, role: r }; // kitchen allowed
+    // if you want admin to *not* access kitchen, keep admin as not ok:
     return { ok: false, reason: "not_kitchen", role: r };
   }
 
@@ -192,8 +193,16 @@ export default function KitchenPage() {
 
     if (!roleRes.ok) {
       stopPolling();
-      if (roleRes.reason === "not_kitchen") nav("/waiter", { replace: true });
-      else nav("/login", { replace: true });
+
+      const r = String(roleRes.role || "").toLowerCase();
+
+      if (r === "admin") {
+        nav("/admin", { replace: true });
+        return;
+      }
+
+      // don't bounce between staff pages
+      nav("/login", { replace: true });
       return;
     }
 

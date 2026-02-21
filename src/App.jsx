@@ -14,11 +14,33 @@ export default function App() {
       <Route path="/order" element={<OrderPage />} />
       <Route path="/login" element={<LoginPage />} />
 
-      <Route path="/kitchen" element={<KitchenPage />} />
-      <Route path="/waiter" element={<WaiterPage />} />
-      <Route path="/reports" element={<ReportsPage />} />
+      <Route
+        path="/kitchen"
+        element={
+          <RequireRole allow={["kitchen"]}>
+            <KitchenPage />
+          </RequireRole>
+        }
+      />
 
-      {/* Admin route (protected) */}
+      <Route
+        path="/waiter"
+        element={
+          <RequireRole allow={["waiter"]}>
+            <WaiterPage />
+          </RequireRole>
+        }
+      />
+
+      <Route
+        path="/reports"
+        element={
+          <RequireRole allow={["kitchen", "waiter", "admin"]}>
+            <ReportsPage />
+          </RequireRole>
+        }
+      />
+
       <Route
         path="/admin"
         element={
