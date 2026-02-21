@@ -181,10 +181,8 @@ export default function WaiterPage() {
     const { data: role, error } = await supabase.rpc("get_my_role");
     if (error) return { ok: false, reason: "role_error" };
     const r = String(role || "").trim().toLowerCase();
-    setMyRole(r);
-
-    // ✅ allow admins into waiter page
-    if (r !== "waiter" && r !== "admin") return { ok: false, reason: "not_waiter", role: r };
+    if (r !== "waiter") return { ok: false, reason: "not_waiter", role: r };
+    return { ok: true, role: r };
   }
 
   useEffect(() => {
@@ -500,15 +498,7 @@ export default function WaiterPage() {
           >
             Reports
           </button>
-          {myRole === "admin" && (
-            <button
-              type="button"
-              onClick={() => nav("/admin")}
-              style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
-            >
-              Admin
-            </button>
-          )}
+
           <button
             type="button"
             onClick={() => {

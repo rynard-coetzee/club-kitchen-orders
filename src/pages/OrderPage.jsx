@@ -903,9 +903,9 @@ export default function OrderPage() {
 
 			{/* ✅ UPDATED: highlight name if missing after submit */}													   
             <input
-			  ref={nameInputRef}				
-              value={name}
-			  onChange={(e) => {
+                ref={nameInputRef}				
+                      value={name}
+                onChange2={(e) => {
                 setName(e.target.value);
                 // as user types, keep it responsive — error highlight goes away automatically
               }}				

@@ -13,19 +13,14 @@ export default function LoginPage() {
 
   async function goByRole() {
     setErr("");
-
     const { data, error } = await supabase.rpc("get_my_role");
+
     if (error) {
       setErr(error.message);
       return;
     }
 
     const role = String(data || "").trim().toLowerCase();
-
-    if (role === "admin") {
-      nav("/admin", { replace: true });
-      return;
-    }
 
     if (role === "kitchen") {
       nav("/kitchen", { replace: true });
@@ -45,7 +40,6 @@ export default function LoginPage() {
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (data.session) {
-        setMsg("Already signed in. Redirecting…");
         await goByRole();
       }
     })();
@@ -129,7 +123,7 @@ export default function LoginPage() {
       </form>
 
       <div style={{ marginTop: 12, color: "#666", fontSize: 12 }}>
-        You will be redirected automatically based on your role (admin / kitchen / waiter).
+        You will be redirected automatically based on your role (kitchen / waiter).
       </div>
     </div>
   );
