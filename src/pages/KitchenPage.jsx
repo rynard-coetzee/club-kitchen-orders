@@ -4,7 +4,6 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import { ding, initSound } from "../lib/sound";
 
-const [myRole, setMyRole] = useState(null);
 
 function money(cents) {
   return `R${(Number(cents || 0) / 100).toFixed(2)}`;
@@ -146,7 +145,7 @@ const ACTIVE_STATUSES = ["queued", "accepted", "preparing", "ready", "awaiting_p
 
 export default function KitchenPage() {
   const nav = useNavigate();
-
+  const [myRole, setMyRole] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
   const [busyOrderId, setBusyOrderId] = useState(null);
