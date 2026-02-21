@@ -158,7 +158,7 @@ function groupItemsWithExtras(orderItems) {
 
 export default function WaiterPage() {
   const nav = useNavigate();
-
+  const [myRole, setMyRole] = useState(null);
   const [orders, setOrders] = useState([]);
   const [err, setErr] = useState("");
   const [busyOrderId, setBusyOrderId] = useState(null);
