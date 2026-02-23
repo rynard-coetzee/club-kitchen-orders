@@ -1,7 +1,7 @@
 // src/pages/AdminPage.jsx
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "../lib/supabaseClient"; // <-- adjust if your path differs
+import { supabase } from "../lib/supabaseClient";
 
 // Menu “sections” in your DB are just menu_items.category (text)
 export default function AdminPage() {
@@ -16,7 +16,7 @@ export default function AdminPage() {
   const [search, setSearch] = useState("");
 
   // Messages
-  const [msg, setMsg] = useState({ type: "info", text: "" }); // type: info | error | success
+  const [msg, setMsg] = useState({ type: "info", text: "" }); // info | error | success
 
   // Category tools
   const [newCategory, setNewCategory] = useState("");
@@ -24,17 +24,21 @@ export default function AdminPage() {
   const [renameTo, setRenameTo] = useState("");
 
   // Create/Edit form
-  const emptyForm = {
+  const makeEmptyForm = () => ({
     id: null,
     name: "",
     description: "",
     category: "",
-    price: "", // in rands (or your currency), user-friendly
+    price: "", // in rands
     is_available: true,
     sort_order: 0,
-  };
-  const [form, setForm] = useState(emptyForm);
+  });
+
+  const [form, setForm] = useState(() => makeEmptyForm());
   const [saving, setSaving] = useState(false);
+
+  // ✅ Single source of truth for edit mode
+  const [editingId, setEditingId] = useState(null);
 
   // ---------- Helpers ----------
   const categories = useMemo(() => {
@@ -146,8 +150,8 @@ export default function AdminPage() {
     };
 
     let res;
-    if (form.id) {
-      res = await supabase.from("menu_items").update(payload).eq("id", form.id).select("id").single();
+    if (editingId) {
+      res = await supabase.from("menu_items").update(payload).eq("id", editingId).select("id").single();
     } else {
       res = await supabase.from("menu_items").insert(payload).select("id").single();
     }
@@ -160,15 +164,21 @@ export default function AdminPage() {
     }
 
     setSaving(false);
-    setSuccess(form.id ? "Item updated." : "Item added.");
-    setForm(emptyForm);
+    setSuccess(editingId ? "Item updated." : "Item added.");
+
+    // ✅ IMPORTANT: fully exit edit mode + reset form
+    setEditingId(null);
+    setForm(makeEmptyForm());
+
     await loadMenu();
   }
 
   function startEdit(it) {
     clearMsg();
+    setEditingId(it.id);
+
     setForm({
-      id: it.id,
+      id: it.id, // kept for convenience; edit mode is controlled by editingId
       name: it.name || "",
       description: it.description || "",
       category: it.category || "",
@@ -176,12 +186,14 @@ export default function AdminPage() {
       is_available: !!it.is_available,
       sort_order: it.sort_order ?? 0,
     });
+
     if (it.category) setCategoryFilter(String(it.category));
   }
 
   function cancelEdit() {
     clearMsg();
-    setForm(emptyForm);
+    setEditingId(null);
+    setForm(makeEmptyForm());
   }
 
   async function deleteItem(it) {
@@ -194,6 +206,13 @@ export default function AdminPage() {
       setError(`Delete failed: ${error.message}`);
       return;
     }
+
+    // If you deleted the item you're editing, exit edit mode
+    if (editingId === it.id) {
+      setEditingId(null);
+      setForm(makeEmptyForm());
+    }
+
     setSuccess("Item deleted.");
     await loadMenu();
   }
@@ -214,6 +233,11 @@ export default function AdminPage() {
       setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, is_available: it.is_available } : x)));
       setError(`Availability update failed: ${error.message}`);
       return;
+    }
+
+    // If you're editing this item, keep the form in sync
+    if (editingId === it.id) {
+      setForm((f) => ({ ...f, is_available: next }));
     }
 
     setSuccess(`"${it.name}" is now ${next ? "Available" : "Out of stock"}.`);
@@ -246,6 +270,12 @@ export default function AdminPage() {
       setError(`Rename failed: ${error.message}`);
       return;
     }
+
+    // If currently editing an item in the renamed category, keep the form in sync
+    if (editingId && String(form.category || "") === from) {
+      setForm((f) => ({ ...f, category: to }));
+    }
+
     setSuccess("Category renamed.");
     setRenameFrom("");
     setRenameTo("");
@@ -548,16 +578,12 @@ export default function AdminPage() {
 
         {/* Form */}
         <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
-          <div style={{ fontWeight: 900, marginBottom: 10 }}>{form.id ? "Edit Item" : "Add Item"}</div>
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>{editingId ? "Edit Item" : "Add Item"}</div>
 
           <form onSubmit={onSubmit} style={{ display: "grid", gap: 10 }}>
             <label style={{ display: "grid", gap: 4 }}>
               <span style={{ fontSize: 12, color: "#666" }}>Name</span>
-              <input
-                value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
-              />
+              <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }} />
             </label>
 
             <label style={{ display: "grid", gap: 4 }}>
@@ -599,22 +625,13 @@ export default function AdminPage() {
 
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  type="checkbox"
-                  checked={!!form.is_available}
-                  onChange={(e) => setForm((f) => ({ ...f, is_available: e.target.checked }))}
-                />
+                <input type="checkbox" checked={!!form.is_available} onChange={(e) => setForm((f) => ({ ...f, is_available: e.target.checked }))} />
                 <span style={{ fontSize: 12, color: "#666" }}>Available</span>
               </label>
 
               <label style={{ display: "grid", gap: 4, marginLeft: "auto", minWidth: 160 }}>
                 <span style={{ fontSize: 12, color: "#666" }}>Sort Order</span>
-                <input
-                  value={form.sort_order}
-                  onChange={(e) => setForm((f) => ({ ...f, sort_order: e.target.value }))}
-                  inputMode="numeric"
-                  style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
-                />
+                <input value={form.sort_order} onChange={(e) => setForm((f) => ({ ...f, sort_order: e.target.value }))} inputMode="numeric" style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }} />
               </label>
             </div>
 
@@ -633,10 +650,10 @@ export default function AdminPage() {
                   flex: 1,
                 }}
               >
-                {saving ? "Saving…" : form.id ? "Save Changes" : "Add Item"}
+                {saving ? "Saving…" : editingId ? "Save Changes" : "Add Item"}
               </button>
 
-              {form.id ? (
+              {editingId ? (
                 <button
                   type="button"
                   onClick={cancelEdit}
