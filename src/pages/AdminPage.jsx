@@ -16,6 +16,15 @@ export default function AdminPage() {
   const clearMsg = () => setMsg({ type: "info", text: "" });
 
   // ---------- Helpers ----------
+  async function logout() {
+  clearMsg();
+  const { error } = await supabase.auth.signOut();
+  if (error) {
+    setError(`Logout failed: ${error.message}`);
+    return;
+  }
+  nav("/login", { replace: true });
+  }
   function centsToDisplay(price_cents) {
     const n = Number(price_cents || 0);
     return (n / 100).toFixed(2);
@@ -698,10 +707,17 @@ export default function AdminPage() {
 
           <button
             type="button"
-            onClick={() => nav(-1)}
-            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+            onClick={logout}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              background: "white",
+              fontWeight: 900,
+              cursor: "pointer",
+            }}
           >
-            Back
+            Logout
           </button>
         </div>
       </div>
