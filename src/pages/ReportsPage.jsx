@@ -24,7 +24,6 @@ function addDays(d, days) {
 }
 
 function safeDateFromYMD(ymd, fallbackDate) {
-  // ymd should be "YYYY-MM-DD"
   const d = new Date(ymd);
   if (Number.isNaN(d.getTime())) return fallbackDate;
   return d;
@@ -49,6 +48,76 @@ function downloadCSV(filename, rows) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+/** -----------------------------
+ * Modifiers/Extras parsing
+ * order_items.extras jsonb format (new):
+ *  {"groups":[{"name":"Cooking","group_id":1,"selected":[{"id":1,"name":"Rare","price_cents":0}]}]}
+ * Also accept: [{name, selected:[...]}]
+ * ----------------------------- */
+function safeArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function parseExtrasGroups(extrasJson) {
+  const obj = extrasJson && typeof extrasJson === "object" ? extrasJson : null;
+  const groups = obj && !Array.isArray(obj) ? safeArray(obj.groups) : safeArray(extrasJson);
+
+  const lines = []; // for rendering
+  const selected = []; // flat list of selected items for reporting
+
+  for (const g of groups) {
+    const gName = String(g?.name || "").trim();
+    const sel = safeArray(g?.selected);
+    if (!gName || sel.length === 0) continue;
+
+    const names = [];
+    for (const s of sel) {
+      const n = String(s?.name || "").trim();
+      if (!n) continue;
+      names.push(n);
+      selected.push({
+        group: gName,
+        name: n,
+        price_cents: Number(s?.price_cents || 0),
+      });
+    }
+
+    if (names.length) {
+      lines.push({ group: gName, value: names.join(", ") });
+    }
+  }
+
+  return { lines, selected };
+}
+
+function renderExtrasUnderItem(extrasJson) {
+  const { lines } = parseExtrasGroups(extrasJson);
+  if (!lines.length) return null;
+
+  return (
+    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
+      {lines.map((l, idx) => (
+        <div key={idx} style={{ fontSize: 12, color: "#555" }}>
+          • <b>{l.group}:</b> {l.value}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function itemExtrasTotalCents(it) {
+  const qty = Number(it?.qty || 0);
+  const { selected } = parseExtrasGroups(it?.extras);
+  const perOne = selected.reduce((sum, s) => sum + Number(s.price_cents || 0), 0);
+  return perOne * qty;
+}
+
+function itemLineTotalCents(it) {
+  const qty = Number(it?.qty || 0);
+  const base = Number(it?.unit_price_cents || 0) * qty;
+  return base + itemExtrasTotalCents(it);
 }
 
 export default function ReportsPage() {
@@ -200,12 +269,8 @@ export default function ReportsPage() {
     } else if (statusFilter === "completed") {
       list = list.filter((o) => o.status === "completed");
     } else if (statusFilter === "active") {
-      list = list.filter((o) =>
-        ["queued", "accepted", "preparing", "ready", "awaiting_payment"].includes(o.status)
-      );
+      list = list.filter((o) => ["queued", "accepted", "preparing", "ready", "awaiting_payment"].includes(o.status));
     }
-    // statusFilter === "all" -> no filtering
-
 
     if (typeFilter !== "all") {
       list = list.filter((o) => o.order_type === typeFilter);
@@ -214,7 +279,14 @@ export default function ReportsPage() {
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((o) => {
-        const itemsText = (o.items || []).map((it) => `${it.name} ${it.item_notes || ""}`).join(" ");
+        const itemsText = (o.items || [])
+          .map((it) => {
+            const base = `${it.name} ${it.item_notes || ""}`;
+            const { selected } = parseExtrasGroups(it?.extras);
+            const modsText = selected.map((s) => `${s.group}:${s.name}`).join(" ");
+            return `${base} ${modsText}`;
+          })
+          .join(" ");
         const blob = `${o.order_number} ${o.customer_name} ${o.order_type} ${o.status} ${itemsText}`.toLowerCase();
         return blob.includes(q);
       });
@@ -230,20 +302,36 @@ export default function ReportsPage() {
     return { count, total, avg };
   }, [filtered]);
 
+  // ✅ NEW: ALL sold “things” (base items + modifier selections)
   const topItems = useMemo(() => {
     const map = new Map();
+
+    function bump(name, qty, revenue) {
+      const key = String(name || "Unknown").trim() || "Unknown";
+      if (!map.has(key)) map.set(key, { name: key, qty: 0, revenue: 0 });
+      const row = map.get(key);
+      row.qty += qty;
+      row.revenue += revenue;
+    }
+
     for (const o of filtered) {
       for (const it of o.items || []) {
-        const name = it.name || "Unknown";
+        const baseName = it.name || "Unknown";
         const qty = Number(it.qty || 0);
-        const rev = qty * Number(it.unit_price_cents || 0);
-        if (!map.has(name)) map.set(name, { name, qty: 0, revenue: 0 });
-        const row = map.get(name);
-        row.qty += qty;
-        row.revenue += rev;
+        const baseRev = qty * Number(it.unit_price_cents || 0);
+        bump(baseName, qty, baseRev);
+
+        // add modifier selections as their own “items”
+        const { selected } = parseExtrasGroups(it?.extras);
+        for (const s of selected) {
+          // show group prefix so cooking/extras don’t clash
+          const label = `${s.group}: ${s.name}`;
+          bump(label, qty, qty * Number(s.price_cents || 0));
+        }
       }
     }
-    return Array.from(map.values()).sort((a, b) => b.qty - a.qty).slice(0, 15);
+
+    return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
   }, [filtered]);
 
   function exportCSV() {
@@ -252,7 +340,12 @@ export default function ReportsPage() {
       const items = (o.items || [])
         .map((it) => {
           const note = it.item_notes ? ` (${it.item_notes})` : "";
-          return `${it.qty}x ${it.name}${note}`;
+          const { selected } = parseExtrasGroups(it?.extras);
+          const mods =
+            selected.length > 0
+              ? ` | ${selected.map((s) => `${s.group}: ${s.name}${Number(s.price_cents || 0) ? ` (${money(s.price_cents)})` : ""}`).join(", ")}`
+              : "";
+          return `${it.qty}x ${it.name}${note}${mods}`;
         })
         .join(" | ");
       return [
@@ -441,11 +534,11 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      {/* Top items */}
+      {/* Top items (ALL incl modifiers) */}
       <div style={{ marginTop: 14, background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <h2 style={{ margin: 0 }}>Top items</h2>
-          <div style={{ color: "#666" }}>Top 15 by quantity</div>
+          <h2 style={{ margin: 0 }}>Items sold</h2>
+          <div style={{ color: "#666" }}>All items (including extras & cooking selections)</div>
         </div>
 
         {topItems.length === 0 ? (
@@ -497,8 +590,9 @@ export default function ReportsPage() {
                       <div>
                         <b>{it.qty}×</b> {it.name}
                         {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
+                        {renderExtrasUnderItem(it?.extras)}
                       </div>
-                      <div style={{ color: "#666" }}>{money(Number(it.unit_price_cents || 0) * Number(it.qty || 0))}</div>
+                      <div style={{ color: "#666" }}>{money(itemLineTotalCents(it))}</div>
                     </div>
                   ))}
                 </div>
