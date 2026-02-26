@@ -1457,6 +1457,9 @@ export default function OrderPage() {
             style={{
               width: "100%",
               maxWidth: 720,
+              maxHeight: "92vh",
+              display: "flex",
+              flexDirection: "column",
               background: "white",
               borderRadius: 16,
               border: "1px solid #eee",
@@ -1471,7 +1474,15 @@ export default function OrderPage() {
               </div>
             </div>
 
-            <div style={{ padding: 14 }}>
+            <div 
+              style={{
+                padding: 14,
+                flex: 1,
+                overflowY: "auto",
+                WebkitOverflowScrolling: "touch",
+                WebkitOverflowScrolling: "touch",
+              }}
+            >  
               {modLoading ? <div style={{ color: "#666" }}>Loading options…</div> : null}
 
               {!modLoading &&
@@ -1550,7 +1561,19 @@ export default function OrderPage() {
               ) : null}
             </div>
 
-            <div style={{ padding: 14, borderTop: "1px solid #eee", display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+            <div 
+              style={{ 
+                padding: 14, 
+                borderTop: "1px solid #eee", 
+                display: "flex", 
+                gap: 10, 
+                justifyContent: "flex-end", 
+                flexWrap: "wrap",
+                position: "sticky",
+                bottom: 0,
+                background: "white",
+                }}
+            >
               <button
                 type="button"
                 onClick={closeModifierModal}
