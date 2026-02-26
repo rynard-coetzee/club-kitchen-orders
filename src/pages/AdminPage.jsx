@@ -258,7 +258,10 @@ export default function AdminPage() {
   const makeEmptyGroupForm = () => ({
     id: null,
     name: "",
-    kind: "extras", // only used if kind exists
+    kind: "extras",
+    is_required: false,
+    min_select: 0,
+    max_select: 1,
     sort_order: 0,
     is_active: true,
   });
@@ -301,7 +304,7 @@ export default function AdminPage() {
     // Try with 'kind' first; if that column doesn’t exist, retry without it.
     let res = await supabase
       .from("modifier_groups")
-      .select("id,name,kind,sort_order,is_active")
+      .select("id,name,kind,is_required,min_select,max_select,sort_order,is_active")
       .order("sort_order", { ascending: true })
       .order("name", { ascending: true });
 
@@ -363,6 +366,9 @@ export default function AdminPage() {
       id: g.id,
       name: g.name || "",
       kind: String(g.kind || "extras"),
+      is_required: !!g.is_required,
+      min_select: Number.isFinite(Number(g.min_select)) ? Number(g.min_select) : 0,
+      max_select: Number.isFinite(Number(g.max_select)) ? Number(g.max_select) : 1,
       sort_order: g.sort_order ?? 0,
       is_active: g.is_active ?? true,
     });
@@ -385,9 +391,31 @@ export default function AdminPage() {
       setError("Group name is required.");
       return;
     }
+    const minSel = Number(groupForm.min_select);
+    const maxSel = Number(groupForm.max_select);
 
+    if (!Number.isInteger(minSel) || minSel < 0) {
+      setGroupSaving(false);
+      setError("Min select must be an integer ≥ 0.");
+      return;
+    }
+
+    if (!Number.isInteger(maxSel) || maxSel < 1) {
+      setGroupSaving(false);
+      setError("Max select must be an integer ≥ 1.");
+      return;
+    }
+
+    if (minSel > maxSel) {
+      setGroupSaving(false);
+      setError("Min select cannot be greater than max select.");
+      return;
+    }
     const basePayload = {
       name,
+      is_required: !!groupForm.is_required,
+      min_select: minSel,
+      max_select: maxSel,
       sort_order: Number.isFinite(Number(groupForm.sort_order)) ? Number(groupForm.sort_order) : 0,
       is_active: !!groupForm.is_active,
     };
@@ -1091,6 +1119,34 @@ export default function AdminPage() {
                   </label>
                 ) : null}
 
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!groupForm.is_required}
+                      onChange={(e) => setGroupForm((f) => ({ ...f, is_required: e.target.checked }))}
+                    />
+                    <span style={{ fontSize: 12, color: "#666" }}>Required</span>
+                  </label>
+                  <label style={{ display: "grid", gap: 4, minWidth: 120 }}>
+                    <span style={{ fontSize: 12, color: "#666" }}>Min Select</span>
+                    <input
+                      value={groupForm.min_select}
+                      onChange={(e) => setGroupForm((f) => ({ ...f, min_select: e.target.value }))}
+                      inputMode="numeric"
+                      style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                    />
+                  </label>
+                  <label style={{ display: "grid", gap: 4, minWidth: 120 }}>
+                    <span style={{ fontSize: 12, color: "#666" }}>Max Select</span>
+                    <input
+                      value={groupForm.max_select}
+                      onChange={(e) => setGroupForm((f) => ({ ...f, max_select: e.target.value }))}
+                      inputMode="numeric"
+                      style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                    />
+                  </label>
+                </div>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <input type="checkbox" checked={!!groupForm.is_active} onChange={(e) => setGroupForm((f) => ({ ...f, is_active: e.target.checked }))} />
