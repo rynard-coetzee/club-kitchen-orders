@@ -7,6 +7,61 @@ function money(cents) {
   return `R${(Number(cents || 0) / 100).toFixed(2)}`;
 }
 
+function safeArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+/**
+ * Supports your NEW extras jsonb shape:
+ * {"groups":[{"name":"Cooking","group_id":1,"selected":[{"id":1,"name":"Rare","price_cents":0}]}]}
+ * and also supports the fallback where extras might already be an array.
+ */
+function parseExtrasGroups(extrasJson) {
+  const obj = extrasJson && typeof extrasJson === "object" ? extrasJson : null;
+  const groups = obj && !Array.isArray(obj) ? safeArray(obj.groups) : safeArray(extrasJson);
+
+  const lines = [];
+  let totalExtrasCents = 0;
+
+  for (const g of groups) {
+    const gName = String(g?.name || "").trim();
+    const selected = safeArray(g?.selected);
+    if (!gName || selected.length === 0) continue;
+
+    const names = [];
+    for (const s of selected) {
+      const n = String(s?.name || "").trim();
+      if (n) names.push(n);
+      totalExtrasCents += Number(s?.price_cents || 0);
+    }
+
+    if (names.length) lines.push({ group: gName, value: names.join(", ") });
+  }
+
+  return { lines, totalExtrasCents, groups };
+}
+
+function renderExtrasUnderItem(extrasJson) {
+  const { lines } = parseExtrasGroups(extrasJson);
+  if (!lines.length) return null;
+
+  return (
+    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
+      {lines.map((l, idx) => (
+        <div key={idx} style={{ fontSize: 12, color: "#555" }}>
+          • <b>{l.group}:</b> {l.value}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// For search + CSV
+function extrasToText(extrasJson) {
+  const { lines } = parseExtrasGroups(extrasJson);
+  if (!lines.length) return "";
+  return lines.map((l) => `${l.group}: ${l.value}`).join(" | ");
+}
 function toLocalInputValue(d) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -304,35 +359,42 @@ export default function ReportsPage() {
 
   // ✅ NEW: ALL sold “things” (base items + modifier selections)
   const topItems = useMemo(() => {
-    const map = new Map();
+  const map = new Map();
 
-    function bump(name, qty, revenue) {
-      const key = String(name || "Unknown").trim() || "Unknown";
-      if (!map.has(key)) map.set(key, { name: key, qty: 0, revenue: 0 });
-      const row = map.get(key);
-      row.qty += qty;
-      row.revenue += revenue;
-    }
+  function addRow(name, qty, revenueCents) {
+    const key = String(name || "Unknown").trim() || "Unknown";
+    if (!map.has(key)) map.set(key, { name: key, qty: 0, revenue: 0 });
+    const row = map.get(key);
+    row.qty += qty;
+    row.revenue += revenueCents;
+  }
 
-    for (const o of filtered) {
-      for (const it of o.items || []) {
-        const baseName = it.name || "Unknown";
-        const qty = Number(it.qty || 0);
-        const baseRev = qty * Number(it.unit_price_cents || 0);
-        bump(baseName, qty, baseRev);
+  for (const o of filtered) {
+    for (const it of o.items || []) {
+      const baseName = it.name || "Unknown";
+      const qty = Number(it.qty || 0);
+      const unit = Number(it.unit_price_cents || 0);
 
-        // add modifier selections as their own “items”
-        const { selected } = parseExtrasGroups(it?.extras);
-        for (const s of selected) {
-          // show group prefix so cooking/extras don’t clash
-          const label = `${s.group}: ${s.name}`;
-          bump(label, qty, qty * Number(s.price_cents || 0));
+      // Base item
+      addRow(baseName, qty, qty * unit);
+
+      // Extras/cooking selections stored in it.extras jsonb
+      const { groups } = parseExtrasGroups(it.extras);
+      for (const g of groups || []) {
+        for (const s of safeArray(g?.selected)) {
+          const exName = String(s?.name || "").trim();
+          if (!exName) continue;
+          const exPrice = Number(s?.price_cents || 0);
+          // each selected modifier counts as sold "qty" times
+          addRow(exName, qty, qty * exPrice);
         }
       }
     }
+  }
 
-    return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
-  }, [filtered]);
+  // ALL items (no slice)
+  return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
+}, [filtered]);
 
   function exportCSV() {
     const header = ["order_number", "created_at", "status", "order_type", "customer_name", "total", "items"];
@@ -585,22 +647,39 @@ export default function ReportsPage() {
                 </div>
 
                 <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-                  {(o.items || []).map((it, idx) => (
-                    <div key={`${o.id}-${idx}`} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                      <div>
-                        <b>{it.qty}×</b> {it.name}
-                        {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
-                        {renderExtrasUnderItem(it?.extras)}
+                  {(o.items || []).map((it, idx) => {
+                    // ✅ extras/modifiers (your RPC should return something like it.modifiers OR it.extras)
+                    const mods = Array.isArray(it.modifiers) ? it.modifiers : Array.isArray(it.extras) ? it.extras : [];
+
+                    const lineBase = Number(it.unit_price_cents || 0) * Number(it.qty || 0);
+                    const modsTotal = mods.reduce((sum, m) => sum + Number(m.price_cents || 0) * Number(it.qty || 0), 0);
+
+                    return (
+                      <div key={`${o.id}-${idx}`} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div>
+                          <b>{it.qty}×</b> {it.name}
+
+                          {it.item_notes ? (
+                            <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
+                          ) : null}
+
+                          {mods.length ? (
+                            <div style={{ marginTop: 4, color: "#666", fontSize: 12, display: "grid", gap: 2 }}>
+                              {mods.map((m, mi) => (
+                                <div key={m.id ?? `${idx}-${mi}`}>
+                                  + {m.name}
+                                  {Number(m.price_cents || 0) ? ` (${money(m.price_cents)})` : ""}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div style={{ color: "#666" }}>{money(lineBase + modsTotal)}</div>
                       </div>
-                      <div style={{ color: "#666" }}>{money(itemLineTotalCents(it))}</div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
       <div style={{ marginTop: 14, color: "#777", fontSize: 12 }}>
         Tip: “Completed only” is best for sales reporting. Use “Active only” if you want to audit queue behaviour.
