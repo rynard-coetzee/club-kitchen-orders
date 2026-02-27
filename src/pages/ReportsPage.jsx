@@ -252,7 +252,7 @@ export default function ReportsPage() {
       }));
 
       // ✅ TEMP DEBUG (uncomment if needed)
-      // if (normalized.length && normalized[0].items?.length) console.log("REPORT ITEM SAMPLE:", normalized[0].items[0]);
+      if (normalized.length && normalized[0].items?.length) console.log("REPORT ITEM SAMPLE:", normalized[0].items[0]);
 
       setOrders(normalized);
       setLastLoadedAt(new Date());
