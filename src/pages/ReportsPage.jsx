@@ -231,7 +231,10 @@ export default function ReportsPage() {
 
       if (normalized !== "kitchen" && normalized !== "waiter") {
         nav("/login", { replace: true });
+<<<<<<< HEAD
         console.log("REPORT ITEM SAMPLE:", normalized[0].items[0]);
+=======
+>>>>>>> 73669f9e3f7e4142c02d321569c3c3e73bf90d98
       }
     }
 
