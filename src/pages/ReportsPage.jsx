@@ -7,61 +7,6 @@ function money(cents) {
   return `R${(Number(cents || 0) / 100).toFixed(2)}`;
 }
 
-function safeArray(v) {
-  return Array.isArray(v) ? v : [];
-}
-
-/**
- * Supports your NEW extras jsonb shape:
- * {"groups":[{"name":"Cooking","group_id":1,"selected":[{"id":1,"name":"Rare","price_cents":0}]}]}
- * and also supports the fallback where extras might already be an array.
- */
-function parseExtrasGroups(extrasJson) {
-  const obj = extrasJson && typeof extrasJson === "object" ? extrasJson : null;
-  const groups = obj && !Array.isArray(obj) ? safeArray(obj.groups) : safeArray(extrasJson);
-
-  const lines = [];
-  let totalExtrasCents = 0;
-
-  for (const g of groups) {
-    const gName = String(g?.name || "").trim();
-    const selected = safeArray(g?.selected);
-    if (!gName || selected.length === 0) continue;
-
-    const names = [];
-    for (const s of selected) {
-      const n = String(s?.name || "").trim();
-      if (n) names.push(n);
-      totalExtrasCents += Number(s?.price_cents || 0);
-    }
-
-    if (names.length) lines.push({ group: gName, value: names.join(", ") });
-  }
-
-  return { lines, totalExtrasCents, groups };
-}
-
-function renderExtrasUnderItem(extrasJson) {
-  const { lines } = parseExtrasGroups(extrasJson);
-  if (!lines.length) return null;
-
-  return (
-    <div style={{ marginTop: 6, marginLeft: 14, display: "grid", gap: 4 }}>
-      {lines.map((l, idx) => (
-        <div key={idx} style={{ fontSize: 12, color: "#555" }}>
-          • <b>{l.group}:</b> {l.value}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// For search + CSV
-function extrasToText(extrasJson) {
-  const { lines } = parseExtrasGroups(extrasJson);
-  if (!lines.length) return "";
-  return lines.map((l) => `${l.group}: ${l.value}`).join(" | ");
-}
 function toLocalInputValue(d) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -106,10 +51,10 @@ function downloadCSV(filename, rows) {
 }
 
 /** -----------------------------
- * Modifiers/Extras parsing
- * order_items.extras jsonb format (new):
- *  {"groups":[{"name":"Cooking","group_id":1,"selected":[{"id":1,"name":"Rare","price_cents":0}]}]}
- * Also accept: [{name, selected:[...]}]
+ * NEW extras jsonb parsing
+ * order_items.extras example:
+ * {"groups":[{"name":"Cooking","group_id":1,"selected":[{"id":1,"name":"Rare","price_cents":0}]}]}
+ * Also tolerate: [{name, selected:[...]}]
  * ----------------------------- */
 function safeArray(v) {
   return Array.isArray(v) ? v : [];
@@ -119,8 +64,8 @@ function parseExtrasGroups(extrasJson) {
   const obj = extrasJson && typeof extrasJson === "object" ? extrasJson : null;
   const groups = obj && !Array.isArray(obj) ? safeArray(obj.groups) : safeArray(extrasJson);
 
-  const lines = []; // for rendering
-  const selected = []; // flat list of selected items for reporting
+  const lines = [];
+  const selected = []; // flat list for aggregation
 
   for (const g of groups) {
     const gName = String(g?.name || "").trim();
@@ -160,6 +105,12 @@ function renderExtrasUnderItem(extrasJson) {
       ))}
     </div>
   );
+}
+
+function extrasToText(extrasJson) {
+  const { lines } = parseExtrasGroups(extrasJson);
+  if (!lines.length) return "";
+  return lines.map((l) => `${l.group}: ${l.value}`).join(" | ");
 }
 
 function itemExtrasTotalCents(it) {
@@ -204,7 +155,7 @@ export default function ReportsPage() {
       setErr("");
 
       const { data } = await supabase.auth.getSession();
-      const session = data.session;
+      const session = data?.session;
       if (!alive) return;
 
       if (!session) {
@@ -225,16 +176,13 @@ export default function ReportsPage() {
         return;
       }
 
-      const normalized = String(r || "").trim().toLowerCase();
-      setRole(normalized);
+      const normalizedRole = String(r || "").trim().toLowerCase();
+      setRole(normalizedRole);
       setAuthReady(true);
 
-      if (normalized !== "kitchen" && normalized !== "waiter") {
+      // Allow kitchen/waiter/admin to view reports
+      if (normalizedRole !== "kitchen" && normalizedRole !== "waiter" && normalizedRole !== "admin") {
         nav("/login", { replace: true });
-<<<<<<< HEAD
-        console.log("REPORT ITEM SAMPLE:", normalized[0].items[0]);
-=======
->>>>>>> 73669f9e3f7e4142c02d321569c3c3e73bf90d98
       }
     }
 
@@ -246,7 +194,7 @@ export default function ReportsPage() {
 
     return () => {
       alive = false;
-      sub.subscription.unsubscribe();
+      sub?.subscription?.unsubscribe?.();
     };
   }, [nav]);
 
@@ -303,6 +251,9 @@ export default function ReportsPage() {
         customer_name: o.customer_name || "",
       }));
 
+      // ✅ TEMP DEBUG (uncomment if needed)
+      // if (normalized.length && normalized[0].items?.length) console.log("REPORT ITEM SAMPLE:", normalized[0].items[0]);
+
       setOrders(normalized);
       setLastLoadedAt(new Date());
     } catch (e) {
@@ -315,7 +266,7 @@ export default function ReportsPage() {
 
   useEffect(() => {
     if (!authReady) return;
-    if (role !== "kitchen" && role !== "waiter") return;
+    if (role !== "kitchen" && role !== "waiter" && role !== "admin") return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authReady, role, queryRange.from.getTime(), queryRange.to.getTime()]);
@@ -330,6 +281,7 @@ export default function ReportsPage() {
     } else if (statusFilter === "active") {
       list = list.filter((o) => ["queued", "accepted", "preparing", "ready", "awaiting_payment"].includes(o.status));
     }
+    // statusFilter === "all" -> no filtering
 
     if (typeFilter !== "all") {
       list = list.filter((o) => o.order_type === typeFilter);
@@ -339,13 +291,9 @@ export default function ReportsPage() {
     if (q) {
       list = list.filter((o) => {
         const itemsText = (o.items || [])
-          .map((it) => {
-            const base = `${it.name} ${it.item_notes || ""}`;
-            const { selected } = parseExtrasGroups(it?.extras);
-            const modsText = selected.map((s) => `${s.group}:${s.name}`).join(" ");
-            return `${base} ${modsText}`;
-          })
+          .map((it) => `${it.name} ${it.item_notes || ""} ${extrasToText(it.extras)}`.trim())
           .join(" ");
+
         const blob = `${o.order_number} ${o.customer_name} ${o.order_type} ${o.status} ${itemsText}`.toLowerCase();
         return blob.includes(q);
       });
@@ -361,59 +309,52 @@ export default function ReportsPage() {
     return { count, total, avg };
   }, [filtered]);
 
-  // ✅ NEW: ALL sold “things” (base items + modifier selections)
+  // ✅ ALL items sold incl modifiers selections
   const topItems = useMemo(() => {
-  const map = new Map();
+    const map = new Map();
 
-  function addRow(name, qty, revenueCents) {
-    const key = String(name || "Unknown").trim() || "Unknown";
-    if (!map.has(key)) map.set(key, { name: key, qty: 0, revenue: 0 });
-    const row = map.get(key);
-    row.qty += qty;
-    row.revenue += revenueCents;
-  }
+    function addRow(name, qty, revenueCents) {
+      const key = String(name || "Unknown").trim() || "Unknown";
+      if (!map.has(key)) map.set(key, { name: key, qty: 0, revenue: 0 });
+      const row = map.get(key);
+      row.qty += qty;
+      row.revenue += revenueCents;
+    }
 
-  for (const o of filtered) {
-    for (const it of o.items || []) {
-      const baseName = it.name || "Unknown";
-      const qty = Number(it.qty || 0);
-      const unit = Number(it.unit_price_cents || 0);
+    for (const o of filtered) {
+      for (const it of o.items || []) {
+        const baseName = it.name || "Unknown";
+        const qty = Number(it.qty || 0);
+        const unit = Number(it.unit_price_cents || 0);
 
-      // Base item
-      addRow(baseName, qty, qty * unit);
+        // Base item
+        addRow(baseName, qty, qty * unit);
 
-      // Extras/cooking selections stored in it.extras jsonb
-      const { groups } = parseExtrasGroups(it.extras);
-      for (const g of groups || []) {
-        for (const s of safeArray(g?.selected)) {
-          const exName = String(s?.name || "").trim();
-          if (!exName) continue;
-          const exPrice = Number(s?.price_cents || 0);
-          // each selected modifier counts as sold "qty" times
-          addRow(exName, qty, qty * exPrice);
+        // NEW extras/cooking selections stored in it.extras json
+        const { selected } = parseExtrasGroups(it.extras);
+        for (const s of selected) {
+          // If you prefer group prefix, use: `${s.group}: ${s.name}`
+          addRow(s.name, qty, qty * Number(s.price_cents || 0));
         }
       }
     }
-  }
 
-  // ALL items (no slice)
-  return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
-}, [filtered]);
+    return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
+  }, [filtered]);
 
   function exportCSV() {
     const header = ["order_number", "created_at", "status", "order_type", "customer_name", "total", "items"];
+
     const rows = filtered.map((o) => {
       const items = (o.items || [])
         .map((it) => {
           const note = it.item_notes ? ` (${it.item_notes})` : "";
-          const { selected } = parseExtrasGroups(it?.extras);
-          const mods =
-            selected.length > 0
-              ? ` | ${selected.map((s) => `${s.group}: ${s.name}${Number(s.price_cents || 0) ? ` (${money(s.price_cents)})` : ""}`).join(", ")}`
-              : "";
-          return `${it.qty}x ${it.name}${note}${mods}`;
+          const ex = extrasToText(it.extras);
+          const exText = ex ? ` [${ex}]` : "";
+          return `${it.qty}x ${it.name}${note}${exText}`;
         })
         .join(" | ");
+
       return [
         o.order_number,
         new Date(o.created_at).toLocaleString(),
@@ -447,12 +388,16 @@ export default function ReportsPage() {
       fontWeight: 900,
       border: "1px solid #e5e5e5",
       background: "#f7f7f7",
+      whiteSpace: "nowrap",
     };
+
     if (status === "queued") return { ...base, background: "#f2f7ff", borderColor: "#dbeafe" };
     if (status === "accepted") return { ...base, background: "#f5f3ff", borderColor: "#e9d5ff" };
     if (status === "preparing") return { ...base, background: "#fff7ed", borderColor: "#fed7aa" };
     if (status === "ready") return { ...base, background: "#ecfdf5", borderColor: "#bbf7d0" };
     if (status === "completed") return { ...base, background: "#f3f4f6", borderColor: "#e5e7eb" };
+    if (status === "paid") return { ...base, background: "#e7f6e7", borderColor: "#bbf7d0" };
+
     return base;
   }
 
@@ -491,7 +436,7 @@ export default function ReportsPage() {
       </div>
 
       {err && (
-        <div style={{ background: "#ffe5e5", padding: 12, borderRadius: 10, marginTop: 12 }}>
+        <div style={{ background: "#ffe5e5", padding: 12, borderRadius: 12, border: "1px solid #fecaca", marginTop: 12 }}>
           <b>Error:</b> {err}
         </div>
       )}
@@ -600,7 +545,7 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      {/* Top items (ALL incl modifiers) */}
+      {/* Items sold (ALL) */}
       <div style={{ marginTop: 14, background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <h2 style={{ margin: 0 }}>Items sold</h2>
@@ -612,7 +557,10 @@ export default function ReportsPage() {
         ) : (
           <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
             {topItems.map((it) => (
-              <div key={it.name} style={{ display: "flex", justifyContent: "space-between", gap: 10, borderTop: "1px solid #f3f3f3", paddingTop: 8 }}>
+              <div
+                key={it.name}
+                style={{ display: "flex", justifyContent: "space-between", gap: 10, borderTop: "1px solid #f3f3f3", paddingTop: 8 }}
+              >
                 <div style={{ fontWeight: 900 }}>{it.name}</div>
                 <div style={{ color: "#666" }}>
                   <b>{it.qty}</b> sold • {money(it.revenue)}
@@ -651,39 +599,25 @@ export default function ReportsPage() {
                 </div>
 
                 <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-                  {(o.items || []).map((it, idx) => {
-                    // ✅ extras/modifiers (your RPC should return something like it.modifiers OR it.extras)
-                    const mods = Array.isArray(it.modifiers) ? it.modifiers : Array.isArray(it.extras) ? it.extras : [];
+                  {(o.items || []).map((it, idx) => (
+                    <div key={`${o.id}-${idx}`} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <div>
+                        <b>{it.qty}×</b> {it.name}
+                        {it.item_notes ? <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div> : null}
 
-                    const lineBase = Number(it.unit_price_cents || 0) * Number(it.qty || 0);
-                    const modsTotal = mods.reduce((sum, m) => sum + Number(m.price_cents || 0) * Number(it.qty || 0), 0);
-
-                    return (
-                      <div key={`${o.id}-${idx}`} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                        <div>
-                          <b>{it.qty}×</b> {it.name}
-
-                          {it.item_notes ? (
-                            <div style={{ color: "#666", fontSize: 12 }}>Note: {it.item_notes}</div>
-                          ) : null}
-
-                          {mods.length ? (
-                            <div style={{ marginTop: 4, color: "#666", fontSize: 12, display: "grid", gap: 2 }}>
-                              {mods.map((m, mi) => (
-                                <div key={m.id ?? `${idx}-${mi}`}>
-                                  + {m.name}
-                                  {Number(m.price_cents || 0) ? ` (${money(m.price_cents)})` : ""}
-                                </div>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-
-                        <div style={{ color: "#666" }}>{money(lineBase + modsTotal)}</div>
+                        {/* ✅ NEW: show extras/cooking selections under the item */}
+                        {renderExtrasUnderItem(it.extras)}
                       </div>
-                    );
-                  })}
+
+                      <div style={{ color: "#666" }}>{money(itemLineTotalCents(it))}</div>
+                    </div>
+                  ))}
                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div style={{ marginTop: 14, color: "#777", fontSize: 12 }}>
         Tip: “Completed only” is best for sales reporting. Use “Active only” if you want to audit queue behaviour.
