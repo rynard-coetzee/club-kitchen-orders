@@ -287,19 +287,36 @@ export default function AdminPage() {
   const targetIdx = direction === "up" ? idx - 1 : idx + 1;
   if (targetIdx < 0 || targetIdx >= ordered.length) return;
 
-  // swap
-  const a = ordered[idx];
-  const b = ordered[targetIdx];
+  const current = ordered[idx];
+  const target = ordered[targetIdx];
 
-  const updates = [
-    supabase.from("menu_categories").update({ sort_order: b.sort_order ?? 0 }).eq("id", a.id),
-    supabase.from("menu_categories").update({ sort_order: a.sort_order ?? 0 }).eq("id", b.id),
-  ];
+  // keep main and normal categories separate
+  if (!!current.is_main !== !!target.is_main) {
+    setError("You can only reorder within the same type (main with main, normal with normal).");
+    return;
+  }
 
-  const [r1, r2] = await Promise.all(updates);
+  const next = [...ordered];
+  const [moved] = next.splice(idx, 1);
+  next.splice(targetIdx, 0, moved);
 
-  if (r1.error || r2.error) {
-    setError(r1.error?.message || r2.error?.message || "Failed to reorder categories.");
+  let mainOrder = 0;
+  let normalOrder = 0;
+
+  const updates = [];
+  for (const cat of next) {
+    const newSort = cat.is_main ? mainOrder++ : normalOrder++;
+    if ((cat.sort_order ?? 0) !== newSort) {
+      updates.push(
+        supabase.from("menu_categories").update({ sort_order: newSort }).eq("id", cat.id)
+      );
+    }
+  }
+
+  const results = await Promise.all(updates);
+  const failed = results.find((r) => r.error);
+  if (failed?.error) {
+    setError(`Failed to reorder categories: ${failed.error.message}`);
     return;
   }
 
