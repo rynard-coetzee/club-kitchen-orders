@@ -184,7 +184,7 @@ export default function AdminPage() {
 
   const [menuItems, setMenuItems] = useState([]);
   const [menuLoading, setMenuLoading] = useState(true);
-
+  const [dragCategoryId, setDragCategoryId] = useState(null);
   const [categoryFilter, setCategoryFilter] = useState("ALL");
   const [search, setSearch] = useState("");
 
@@ -210,6 +210,102 @@ export default function AdminPage() {
       return catOk && sOk;
     });
   }, [menuItems, categoryFilter, search]);
+  async function reorderCategoriesByDrag(sourceId, targetId) {
+  clearMsg();
+  if (!sourceId || !targetId || sourceId === targetId) return;
+
+  const ordered = [...categories].sort((a, b) => {
+    if ((b.is_main ? 1 : 0) !== (a.is_main ? 1 : 0)) {
+      return (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0);
+    }
+    if ((a.sort_order ?? 0) !== (b.sort_order ?? 0)) {
+      return (a.sort_order ?? 0) - (b.sort_order ?? 0);
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+
+  const sourceIndex = ordered.findIndex((c) => c.id === sourceId);
+  const targetIndex = ordered.findIndex((c) => c.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+
+  const sourceCat = ordered[sourceIndex];
+  const targetCat = ordered[targetIndex];
+
+  // Optional rule: only reorder within same main/normal bucket
+  if (!!sourceCat.is_main !== !!targetCat.is_main) {
+    setError("You can only drag categories within the same type (main with main, normal with normal).");
+    return;
+  }
+
+  const next = [...ordered];
+  const [moved] = next.splice(sourceIndex, 1);
+  next.splice(targetIndex, 0, moved);
+
+  // reassign sort_order sequentially inside each bucket
+  const updates = [];
+  let mainOrder = 0;
+  let normalOrder = 0;
+
+  for (const cat of next) {
+    const newSort = cat.is_main ? mainOrder++ : normalOrder++;
+    if ((cat.sort_order ?? 0) !== newSort) {
+      updates.push(
+        supabase.from("menu_categories").update({ sort_order: newSort }).eq("id", cat.id)
+      );
+    }
+  }
+
+  if (!updates.length) return;
+
+  const results = await Promise.all(updates);
+  const failed = results.find((r) => r.error);
+  if (failed?.error) {
+    setError(`Failed to reorder categories: ${failed.error.message}`);
+    return;
+  }
+
+  setSuccess("Category order updated.");
+  await loadCategories();
+} 
+
+  async function moveCategory(catId, direction) {
+  clearMsg();
+
+  const ordered = [...categories].sort((a, b) => {
+    if ((b.is_main ? 1 : 0) !== (a.is_main ? 1 : 0)) {
+      return (b.is_main ? 1 : 0) - (a.is_main ? 1 : 0);
+    }
+    if ((a.sort_order ?? 0) !== (b.sort_order ?? 0)) {
+      return (a.sort_order ?? 0) - (b.sort_order ?? 0);
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
+
+  const idx = ordered.findIndex((c) => c.id === catId);
+  if (idx < 0) return;
+
+  const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= ordered.length) return;
+
+  // swap
+  const a = ordered[idx];
+  const b = ordered[targetIdx];
+
+  const updates = [
+    supabase.from("menu_categories").update({ sort_order: b.sort_order ?? 0 }).eq("id", a.id),
+    supabase.from("menu_categories").update({ sort_order: a.sort_order ?? 0 }).eq("id", b.id),
+  ];
+
+  const [r1, r2] = await Promise.all(updates);
+
+  if (r1.error || r2.error) {
+    setError(r1.error?.message || r2.error?.message || "Failed to reorder categories.");
+    return;
+  }
+
+  setSuccess("Category order updated.");
+  await loadCategories();
+}
 
   async function loadMenu() {
     setMenuLoading(true);
@@ -1112,13 +1208,16 @@ export default function AdminPage() {
       ) : null}
 
       {tab === "categories" ? (
+        
         <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 12 }}>
           <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <div style={{ fontWeight: 900 }}>Categories</div>
               {categoriesLoading ? <div style={{ color: "#666" }}>Loading…</div> : null}
             </div>
-
+            <div style={{ marginTop: 6, color: "#666", fontSize: 12 }}>
+              Drag categories to reorder them, or use ↑ / ↓.
+            </div>
             <div style={{ marginTop: 10, overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
@@ -1131,13 +1230,61 @@ export default function AdminPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {categories.map((cat) => (
-                    <tr key={cat.id} style={{ borderBottom: "1px solid #f2f2f2" }}>
+                  {categories.map((cat, idx) => (
+                    <tr
+                      key={cat.id}
+                      draggable
+                      onDragStart={() => setDragCategoryId(cat.id)}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={async () => {
+                        await reorderCategoriesByDrag(dragCategoryId, cat.id);
+                        setDragCategoryId(null);
+                      }}
+                      onDragEnd={() => setDragCategoryId(null)}
+                      style={{
+                        borderBottom: "1px solid #f2f2f2",
+                        background: dragCategoryId === cat.id ? "#f8fafc" : "transparent",
+                        cursor: "grab",
+                      }}
+                    >
                       <td style={{ padding: "8px 6px", fontWeight: 800 }}>{cat.name}</td>
                       <td style={{ padding: "8px 6px" }}>{cat.is_main ? "Main" : "Normal"}</td>
                       <td style={{ padding: "8px 6px" }}>{cat.is_active === false ? "No" : "Yes"}</td>
                       <td style={{ padding: "8px 6px" }}>{cat.sort_order ?? 0}</td>
                       <td style={{ padding: "8px 6px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => moveCategory(cat.id, "up")}
+                          disabled={idx === 0}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            background: "white",
+                            fontWeight: 900,
+                            cursor: idx === 0 ? "not-allowed" : "pointer",
+                            opacity: idx === 0 ? 0.6 : 1,
+                          }}
+                        >
+                           ↑
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveCategory(cat.id, "down")}
+                          disabled={idx === categories.length - 1}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            background: "white",
+                            fontWeight: 900,
+                            cursor: idx === categories.length - 1 ? "not-allowed" : "pointer",
+                            opacity: idx === categories.length - 1 ? 0.6 : 1,
+                          }}
+                        >
+                          ↓
+                        </button>
+
                         <button
                           type="button"
                           onClick={() => startEditCategory(cat)}
