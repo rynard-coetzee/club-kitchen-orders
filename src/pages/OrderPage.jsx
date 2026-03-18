@@ -8,14 +8,46 @@ function money(cents) {
   return `R${(Number(cents || 0) / 100).toFixed(2)}`;
 }
 
-function groupByCategory(items) {
+function groupByCategory(items, categoriesMeta = []) {
   const map = new Map();
+
   for (const it of items) {
-    const cat = it.category || "Other";
+    const cat = String(it.category || "Other");
     if (!map.has(cat)) map.set(cat, []);
     map.get(cat).push(it);
   }
-  return Array.from(map.entries());
+
+  const metaMap = new Map(
+    (categoriesMeta || []).map((c) => [
+      String(c.name),
+      {
+        name: String(c.name),
+        is_main: !!c.is_main,
+        sort_order: Number(c.sort_order || 0),
+      },
+    ])
+  );
+
+  const orderedNames = Array.from(map.keys()).sort((a, b) => {
+    const ma = metaMap.get(a);
+    const mb = metaMap.get(b);
+
+    // categories from menu_categories first, unknown categories last
+    if (ma && !mb) return -1;
+    if (!ma && mb) return 1;
+
+    const aMain = ma?.is_main ? 1 : 0;
+    const bMain = mb?.is_main ? 1 : 0;
+    if (aMain !== bMain) return bMain - aMain; // main first
+
+    const aSort = ma?.sort_order ?? 999999;
+    const bSort = mb?.sort_order ?? 999999;
+    if (aSort !== bSort) return aSort - bSort;
+
+    return String(a).localeCompare(String(b));
+  });
+
+  return orderedNames.map((name) => [name, map.get(name)]);
 }
 
 function statusPillStyle(status) {
@@ -76,6 +108,7 @@ export default function OrderPage() {
   const topRef = useRef(null);
   const nameInputRef = useRef(null);															  
   const [menu, setMenu] = useState([]);
+  const [menuCategories, setMenuCategories] = useState([]);
   // cart line:
   // {
   //   menu_item_id, name, price_cents, qty, item_notes,
@@ -135,7 +168,7 @@ export default function OrderPage() {
   const [modLoading, setModLoading] = useState(false);
   const [modError, setModError] = useState("");
 
-  const grouped = useMemo(() => groupByCategory(menu), [menu]);
+  const grouped = useMemo(() => groupByCategory(menu, menuCategories), [menu, menuCategories]);
 
   const filteredGrouped = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -181,22 +214,41 @@ export default function OrderPage() {
   }
 
   async function loadMenu() {
-    setIsMenuLoading(true);
-    setErr("");
+  setIsMenuLoading(true);
+  setErr("");
 
-    const { data, error } = await supabase
+  const [itemsRes, categoriesRes] = await Promise.all([
+    supabase
       .from("menu_items")
       .select("id,name,description,price_cents,category,sort_order,is_available")
       .eq("is_available", true)
-      .order("category", { ascending: true })
       .order("sort_order", { ascending: true })
-      .order("name", { ascending: true });
+      .order("name", { ascending: true }),
 
-    setIsMenuLoading(false);
+    supabase
+      .from("menu_categories")
+      .select("id,name,is_main,sort_order,is_active")
+      .eq("is_active", true)
+      .order("is_main", { ascending: false })
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true }),
+  ]);
 
-    if (error) return setErr(error.message);
-    setMenu(data || []);
+  setIsMenuLoading(false);
+
+  if (itemsRes.error) {
+    setErr(itemsRes.error.message);
+    return;
   }
+
+  if (categoriesRes.error) {
+    setErr(categoriesRes.error.message);
+    return;
+  }
+
+  setMenu(itemsRes.data || []);
+  setMenuCategories(categoriesRes.data || []);
+}
 
   useEffect(() => {
     loadMenu();

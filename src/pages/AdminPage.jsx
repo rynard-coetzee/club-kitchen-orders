@@ -1,4 +1,3 @@
-// src/pages/AdminPage.jsx
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
@@ -6,25 +5,23 @@ import { supabase } from "../lib/supabaseClient";
 export default function AdminPage() {
   const nav = useNavigate();
 
-  // ---------- Tabs ----------
-  const [tab, setTab] = useState("menu"); // "menu" | "modifiers" | "assign"
+  const [tab, setTab] = useState("menu"); // menu | categories | modifiers | assign
 
-  // ---------- Toast/messages ----------
-  const [msg, setMsg] = useState({ type: "info", text: "" }); // info | error | success
+  const [msg, setMsg] = useState({ type: "info", text: "" });
   const setError = (text) => setMsg({ type: "error", text });
   const setSuccess = (text) => setMsg({ type: "success", text });
   const clearMsg = () => setMsg({ type: "info", text: "" });
 
-  // ---------- Helpers ----------
   async function logout() {
-  clearMsg();
-  const { error } = await supabase.auth.signOut();
-  if (error) {
-    setError(`Logout failed: ${error.message}`);
-    return;
+    clearMsg();
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      setError(`Logout failed: ${error.message}`);
+      return;
+    }
+    nav("/login", { replace: true });
   }
-  nav("/login", { replace: true });
-  }
+
   function centsToDisplay(price_cents) {
     const n = Number(price_cents || 0);
     return (n / 100).toFixed(2);
@@ -39,7 +36,141 @@ export default function AdminPage() {
   }
 
   // ============================================================
-  // MENU TAB (menu_items)
+  // CATEGORIES TAB
+  // ============================================================
+  const makeEmptyCategoryForm = () => ({
+    id: null,
+    name: "",
+    is_main: false,
+    sort_order: 0,
+    is_active: true,
+  });
+
+  const [categories, setCategories] = useState([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
+  const [categoryForm, setCategoryForm] = useState(() => makeEmptyCategoryForm());
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [categoryEditingId, setCategoryEditingId] = useState(null);
+
+  async function loadCategories() {
+    setCategoriesLoading(true);
+    const { data, error } = await supabase
+      .from("menu_categories")
+      .select("id,name,is_main,sort_order,is_active")
+      .order("is_main", { ascending: false })
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true });
+
+    if (error) {
+      setCategories([]);
+      setCategoriesLoading(false);
+      setError(`Failed to load categories: ${error.message}`);
+      return;
+    }
+
+    setCategories(data || []);
+    setCategoriesLoading(false);
+  }
+
+  async function saveCategory(e) {
+    e.preventDefault();
+    setCategorySaving(true);
+    clearMsg();
+
+    const name = String(categoryForm.name || "").trim();
+    if (!name) {
+      setCategorySaving(false);
+      setError("Category name is required.");
+      return;
+    }
+
+    const payload = {
+      name,
+      is_main: !!categoryForm.is_main,
+      sort_order: Number.isFinite(Number(categoryForm.sort_order)) ? Number(categoryForm.sort_order) : 0,
+      is_active: !!categoryForm.is_active,
+    };
+
+    let res;
+    if (categoryEditingId) {
+      const old = categories.find((c) => c.id === categoryEditingId);
+
+      res = await supabase.from("menu_categories").update(payload).eq("id", categoryEditingId).select("id").single();
+
+      if (!res?.error && old && old.name !== name) {
+        // keep existing app working by updating menu_items.category text too
+        const sync = await supabase.from("menu_items").update({ category: name }).eq("category", old.name);
+        if (sync.error) {
+          setCategorySaving(false);
+          setError(`Category saved, but menu_items sync failed: ${sync.error.message}`);
+          return;
+        }
+      }
+    } else {
+      res = await supabase.from("menu_categories").insert(payload).select("id").single();
+    }
+
+    if (res?.error) {
+      setCategorySaving(false);
+      setError(`Save category failed: ${res.error.message}`);
+      return;
+    }
+
+    setCategorySaving(false);
+    setSuccess(categoryEditingId ? "Category updated." : "Category added.");
+    setCategoryEditingId(null);
+    setCategoryForm(makeEmptyCategoryForm());
+    await loadCategories();
+    await loadMenu();
+  }
+
+  function startEditCategory(cat) {
+    clearMsg();
+    setCategoryEditingId(cat.id);
+    setCategoryForm({
+      id: cat.id,
+      name: cat.name || "",
+      is_main: !!cat.is_main,
+      sort_order: cat.sort_order ?? 0,
+      is_active: cat.is_active ?? true,
+    });
+  }
+
+  function cancelEditCategory() {
+    clearMsg();
+    setCategoryEditingId(null);
+    setCategoryForm(makeEmptyCategoryForm());
+  }
+
+  async function deleteCategory(cat) {
+    clearMsg();
+
+    const inUse = menuItems.filter((m) => String(m.category || "") === String(cat.name || ""));
+    if (inUse.length > 0) {
+      setError(`Cannot delete "${cat.name}" because ${inUse.length} menu item(s) still use it.`);
+      return;
+    }
+
+    const ok = window.confirm(`Delete category "${cat.name}"?`);
+    if (!ok) return;
+
+    const { error } = await supabase.from("menu_categories").delete().eq("id", cat.id);
+    if (error) {
+      setError(`Delete category failed: ${error.message}`);
+      return;
+    }
+
+    if (categoryEditingId === cat.id) {
+      setCategoryEditingId(null);
+      setCategoryForm(makeEmptyCategoryForm());
+    }
+
+    setSuccess("Category deleted.");
+    await loadCategories();
+  }
+
+  // ============================================================
+  // MENU TAB
   // ============================================================
   const makeEmptyMenuForm = () => ({
     id: null,
@@ -61,13 +192,11 @@ export default function AdminPage() {
   const [menuSaving, setMenuSaving] = useState(false);
   const [menuEditingId, setMenuEditingId] = useState(null);
 
-  const menuCategories = useMemo(() => {
-    const set = new Set();
-    for (const it of menuItems) {
-      if (it.category && String(it.category).trim()) set.add(String(it.category));
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [menuItems]);
+  const activeCategoryNames = useMemo(() => {
+    return categories
+      .filter((c) => c.is_active !== false)
+      .map((c) => c.name);
+  }, [categories]);
 
   const filteredMenuItems = useMemo(() => {
     const s = search.trim().toLowerCase();
@@ -116,7 +245,14 @@ export default function AdminPage() {
     const category = String(menuForm.category || "").trim();
     if (!category) {
       setMenuSaving(false);
-      setError("Category (section) is required.");
+      setError("Category is required.");
+      return;
+    }
+
+    const categoryExists = categories.some((c) => String(c.name) === category);
+    if (!categoryExists) {
+      setMenuSaving(false);
+      setError("Please create/select a category first in the Categories tab.");
       return;
     }
 
@@ -253,7 +389,7 @@ export default function AdminPage() {
   }
 
   // ============================================================
-  // MODIFIERS TAB (modifier_groups + modifier_items)
+  // MODIFIERS TAB
   // ============================================================
   const makeEmptyGroupForm = () => ({
     id: null,
@@ -270,7 +406,7 @@ export default function AdminPage() {
     id: null,
     group_id: null,
     name: "",
-    price: "", // in rands
+    price: "",
     sort_order: 0,
     is_active: true,
   });
@@ -279,7 +415,7 @@ export default function AdminPage() {
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [hasGroupKind, setHasGroupKind] = useState(false);
 
-  const [groupFilterKind, setGroupFilterKind] = useState("all"); // all | extras | cooking
+  const [groupFilterKind, setGroupFilterKind] = useState("all");
   const [selectedGroupId, setSelectedGroupId] = useState(null);
 
   const [groupForm, setGroupForm] = useState(() => makeEmptyGroupForm());
@@ -301,7 +437,6 @@ export default function AdminPage() {
   async function loadGroups() {
     setGroupsLoading(true);
 
-    // Try with 'kind' first; if that column doesn’t exist, retry without it.
     let res = await supabase
       .from("modifier_groups")
       .select("id,name,kind,is_required,min_select,max_select,sort_order,is_active")
@@ -309,10 +444,9 @@ export default function AdminPage() {
       .order("name", { ascending: true });
 
     if (res.error) {
-      // fallback
       res = await supabase
         .from("modifier_groups")
-        .select("id,name,sort_order,is_active")
+        .select("id,name,is_required,min_select,max_select,sort_order,is_active")
         .order("sort_order", { ascending: true })
         .order("name", { ascending: true });
 
@@ -391,6 +525,7 @@ export default function AdminPage() {
       setError("Group name is required.");
       return;
     }
+
     const minSel = Number(groupForm.min_select);
     const maxSel = Number(groupForm.max_select);
 
@@ -411,6 +546,7 @@ export default function AdminPage() {
       setError("Min select cannot be greater than max select.");
       return;
     }
+
     const basePayload = {
       name,
       is_required: !!groupForm.is_required,
@@ -439,7 +575,6 @@ export default function AdminPage() {
     setSuccess(groupEditingId ? "Group updated." : "Group added.");
     setGroupEditingId(null);
     setGroupForm(makeEmptyGroupForm());
-
     await loadGroups();
   }
 
@@ -448,31 +583,12 @@ export default function AdminPage() {
     const ok = window.confirm(`Delete group "${g.name}"?\nThis will also remove its items and assignments (if FK cascade exists).`);
     if (!ok) return;
 
-    // Safety: prevent delete if items exist (even if cascade exists)
-    const { data: countRows, error: countErr } = await supabase
-      .from("modifier_items")
-      .select("id", { count: "exact", head: true })
-      .eq("group_id", g.id);
-
-    if (countErr) {
-      setError(`Pre-check failed: ${countErr.message}`);
+    const tmp = await supabase.from("modifier_items").select("id").eq("group_id", g.id).limit(1);
+    if (tmp.error) {
+      setError(`Pre-check failed: ${tmp.error.message}`);
       return;
     }
-
-    const count = countRows?.length ? countRows.length : 0; // head:true usually returns null data; some configs differ
-    // If your client returns null data with head:true, do a non-head count:
-    // We'll do a fallback if data is null:
-    if (countRows == null) {
-      const tmp = await supabase.from("modifier_items").select("id").eq("group_id", g.id).limit(1);
-      if (tmp.error) {
-        setError(`Pre-check failed: ${tmp.error.message}`);
-        return;
-      }
-      if ((tmp.data || []).length > 0) {
-        setError(`Cannot delete "${g.name}" because it still has items. Delete/move items first.`);
-        return;
-      }
-    } else if (count > 0) {
+    if ((tmp.data || []).length > 0) {
       setError(`Cannot delete "${g.name}" because it still has items. Delete/move items first.`);
       return;
     }
@@ -596,7 +712,7 @@ export default function AdminPage() {
   }
 
   // ============================================================
-  // ASSIGN TAB (menu_item_modifier_groups)
+  // ASSIGN TAB
   // ============================================================
   const [assignMenuItemId, setAssignMenuItemId] = useState("");
   const [assignedGroupIds, setAssignedGroupIds] = useState(new Set());
@@ -635,7 +751,6 @@ export default function AdminPage() {
 
     const isAssigned = assignedGroupIds.has(groupId);
 
-    // optimistic
     setAssignedGroupIds((prev) => {
       const next = new Set(prev);
       if (isAssigned) next.delete(groupId);
@@ -651,7 +766,6 @@ export default function AdminPage() {
         .eq("group_id", groupId);
 
       if (error) {
-        // revert
         setAssignedGroupIds((prev) => {
           const next = new Set(prev);
           next.add(groupId);
@@ -669,7 +783,6 @@ export default function AdminPage() {
       });
 
       if (error) {
-        // revert
         setAssignedGroupIds((prev) => {
           const next = new Set(prev);
           next.delete(groupId);
@@ -686,36 +799,30 @@ export default function AdminPage() {
   // Initial load
   // ============================================================
   useEffect(() => {
+    loadCategories();
     loadMenu();
-    // Load groups early (used by modifiers + assign tabs)
     loadGroups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reload modifier items when group selection changes
   useEffect(() => {
     if (tab !== "modifiers") return;
     if (selectedGroupId) loadModifierItems(selectedGroupId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGroupId, tab]);
 
-  // Reload assignments when menu item changes
   useEffect(() => {
     if (tab !== "assign") return;
     loadAssignments(assignMenuItemId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assignMenuItemId, tab]);
 
-  // ============================================================
-  // UI
-  // ============================================================
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 1200, margin: "0 auto", textAlign: "left" }}>
-      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: 0 }}>Admin</h1>
-          <div style={{ color: "#666", marginTop: 4 }}>Menu • Extras • Cooking Instructions • Assignments</div>
+          <div style={{ color: "#666", marginTop: 4 }}>Menu • Categories • Extras • Cooking Instructions • Assignments</div>
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -723,6 +830,7 @@ export default function AdminPage() {
             type="button"
             onClick={() => {
               clearMsg();
+              loadCategories();
               loadMenu();
               loadGroups();
               if (selectedGroupId) loadModifierItems(selectedGroupId);
@@ -736,24 +844,17 @@ export default function AdminPage() {
           <button
             type="button"
             onClick={logout}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              background: "white",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
+            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
           >
             Logout
           </button>
         </div>
       </div>
 
-      {/* Tabs */}
       <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
         {[
           ["menu", "Menu"],
+          ["categories", "Categories"],
           ["modifiers", "Extras & Cooking"],
           ["assign", "Assign to Items"],
         ].map(([k, label]) => (
@@ -779,7 +880,6 @@ export default function AdminPage() {
         ))}
       </div>
 
-      {/* Message */}
       {msg.text ? (
         <div
           style={{
@@ -795,13 +895,9 @@ export default function AdminPage() {
         </div>
       ) : null}
 
-      {/* ====================================================== */}
-      {/* MENU TAB */}
-      {/* ====================================================== */}
       {tab === "menu" ? (
         <div style={{ marginTop: 14 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 12 }}>
-            {/* Items table */}
             <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div style={{ fontWeight: 900 }}>Menu Items</div>
@@ -817,7 +913,7 @@ export default function AdminPage() {
                     style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", minWidth: 220 }}
                   >
                     <option value="ALL">All</option>
-                    {menuCategories.map((c) => (
+                    {activeCategoryNames.map((c) => (
                       <option key={c} value={c}>
                         {c}
                       </option>
@@ -901,14 +997,17 @@ export default function AdminPage() {
               </div>
             </div>
 
-            {/* Menu form */}
             <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
               <div style={{ fontWeight: 900, marginBottom: 10 }}>{menuEditingId ? "Edit Item" : "Add Item"}</div>
 
               <form onSubmit={saveMenuItem} style={{ display: "grid", gap: 10 }}>
                 <label style={{ display: "grid", gap: 4 }}>
                   <span style={{ fontSize: 12, color: "#666" }}>Name</span>
-                  <input value={menuForm.name} onChange={(e) => setMenuForm((f) => ({ ...f, name: e.target.value }))} style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }} />
+                  <input
+                    value={menuForm.name}
+                    onChange={(e) => setMenuForm((f) => ({ ...f, name: e.target.value }))}
+                    style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                  />
                 </label>
 
                 <label style={{ display: "grid", gap: 4 }}>
@@ -922,19 +1021,19 @@ export default function AdminPage() {
                 </label>
 
                 <label style={{ display: "grid", gap: 4 }}>
-                  <span style={{ fontSize: 12, color: "#666" }}>Category (Section)</span>
-                  <input
+                  <span style={{ fontSize: 12, color: "#666" }}>Category</span>
+                  <select
                     value={menuForm.category}
                     onChange={(e) => setMenuForm((f) => ({ ...f, category: e.target.value }))}
-                    list="category-list"
-                    placeholder='e.g. "Starters"'
                     style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
-                  />
-                  <datalist id="category-list">
-                    {menuCategories.map((c) => (
-                      <option key={c} value={c} />
+                  >
+                    <option value="">Select…</option>
+                    {activeCategoryNames.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
                     ))}
-                  </datalist>
+                  </select>
                 </label>
 
                 <label style={{ display: "grid", gap: 4 }}>
@@ -950,13 +1049,22 @@ export default function AdminPage() {
 
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <input type="checkbox" checked={!!menuForm.is_available} onChange={(e) => setMenuForm((f) => ({ ...f, is_available: e.target.checked }))} />
+                    <input
+                      type="checkbox"
+                      checked={!!menuForm.is_available}
+                      onChange={(e) => setMenuForm((f) => ({ ...f, is_available: e.target.checked }))}
+                    />
                     <span style={{ fontSize: 12, color: "#666" }}>Available</span>
                   </label>
 
                   <label style={{ display: "grid", gap: 4, marginLeft: "auto", minWidth: 160 }}>
                     <span style={{ fontSize: 12, color: "#666" }}>Sort Order</span>
-                    <input value={menuForm.sort_order} onChange={(e) => setMenuForm((f) => ({ ...f, sort_order: e.target.value }))} inputMode="numeric" style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }} />
+                    <input
+                      value={menuForm.sort_order}
+                      onChange={(e) => setMenuForm((f) => ({ ...f, sort_order: e.target.value }))}
+                      inputMode="numeric"
+                      style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                    />
                   </label>
                 </div>
 
@@ -1003,12 +1111,150 @@ export default function AdminPage() {
         </div>
       ) : null}
 
-      {/* ====================================================== */}
-      {/* MODIFIERS TAB */}
-      {/* ====================================================== */}
+      {tab === "categories" ? (
+        <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 12 }}>
+          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div style={{ fontWeight: 900 }}>Categories</div>
+              {categoriesLoading ? <div style={{ color: "#666" }}>Loading…</div> : null}
+            </div>
+
+            <div style={{ marginTop: 10, overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ textAlign: "left", borderBottom: "1px solid #eee" }}>
+                    <th style={{ padding: "8px 6px" }}>Name</th>
+                    <th style={{ padding: "8px 6px" }}>Type</th>
+                    <th style={{ padding: "8px 6px" }}>Active</th>
+                    <th style={{ padding: "8px 6px" }}>Sort</th>
+                    <th style={{ padding: "8px 6px" }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {categories.map((cat) => (
+                    <tr key={cat.id} style={{ borderBottom: "1px solid #f2f2f2" }}>
+                      <td style={{ padding: "8px 6px", fontWeight: 800 }}>{cat.name}</td>
+                      <td style={{ padding: "8px 6px" }}>{cat.is_main ? "Main" : "Normal"}</td>
+                      <td style={{ padding: "8px 6px" }}>{cat.is_active === false ? "No" : "Yes"}</td>
+                      <td style={{ padding: "8px 6px" }}>{cat.sort_order ?? 0}</td>
+                      <td style={{ padding: "8px 6px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => startEditCategory(cat)}
+                          style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteCategory(cat)}
+                          style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #f0c7c7", background: "white", fontWeight: 900, cursor: "pointer" }}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {!categoriesLoading && categories.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} style={{ padding: 10, color: "#666" }}>
+                        No categories yet.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+            <div style={{ fontWeight: 900, marginBottom: 10 }}>{categoryEditingId ? "Edit Category" : "Add Category"}</div>
+
+            <form onSubmit={saveCategory} style={{ display: "grid", gap: 10 }}>
+              <label style={{ display: "grid", gap: 4 }}>
+                <span style={{ fontSize: 12, color: "#666" }}>Name</span>
+                <input
+                  value={categoryForm.name}
+                  onChange={(e) => setCategoryForm((f) => ({ ...f, name: e.target.value }))}
+                  style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                />
+              </label>
+
+              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={!!categoryForm.is_main}
+                  onChange={(e) => setCategoryForm((f) => ({ ...f, is_main: e.target.checked }))}
+                />
+                <span style={{ fontSize: 12, color: "#666" }}>Main category (always displayed first)</span>
+              </label>
+
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!categoryForm.is_active}
+                    onChange={(e) => setCategoryForm((f) => ({ ...f, is_active: e.target.checked }))}
+                  />
+                  <span style={{ fontSize: 12, color: "#666" }}>Active</span>
+                </label>
+
+                <label style={{ display: "grid", gap: 4, marginLeft: "auto", minWidth: 160 }}>
+                  <span style={{ fontSize: 12, color: "#666" }}>Sort Order</span>
+                  <input
+                    value={categoryForm.sort_order}
+                    onChange={(e) => setCategoryForm((f) => ({ ...f, sort_order: e.target.value }))}
+                    inputMode="numeric"
+                    style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                  />
+                </label>
+              </div>
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  type="submit"
+                  disabled={categorySaving}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid #ddd",
+                    background: "white",
+                    fontWeight: 900,
+                    cursor: categorySaving ? "not-allowed" : "pointer",
+                    opacity: categorySaving ? 0.7 : 1,
+                    flex: 1,
+                  }}
+                >
+                  {categorySaving ? "Saving…" : categoryEditingId ? "Save Changes" : "Add Category"}
+                </button>
+
+                {categoryEditingId ? (
+                  <button
+                    type="button"
+                    onClick={cancelEditCategory}
+                    disabled={categorySaving}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      background: "white",
+                      fontWeight: 900,
+                      cursor: categorySaving ? "not-allowed" : "pointer",
+                      opacity: categorySaving ? 0.7 : 1,
+                    }}
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
       {tab === "modifiers" ? (
         <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          {/* Groups */}
           <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <div style={{ fontWeight: 900 }}>Groups (Extras / Cooking)</div>
@@ -1033,11 +1279,7 @@ export default function AdminPage() {
                     <option value="cooking">Cooking</option>
                   </select>
                 </label>
-              ) : (
-                <div style={{ color: "#666", fontSize: 12 }}>
-                  Tip: add a <code>kind</code> column to <code>modifier_groups</code> to separate Extras vs Cooking cleanly.
-                </div>
-              )}
+              ) : null}
             </div>
 
             <div style={{ marginTop: 10, overflowX: "auto" }}>
@@ -1128,6 +1370,7 @@ export default function AdminPage() {
                     />
                     <span style={{ fontSize: 12, color: "#666" }}>Required</span>
                   </label>
+
                   <label style={{ display: "grid", gap: 4, minWidth: 120 }}>
                     <span style={{ fontSize: 12, color: "#666" }}>Min Select</span>
                     <input
@@ -1137,6 +1380,7 @@ export default function AdminPage() {
                       style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
                     />
                   </label>
+
                   <label style={{ display: "grid", gap: 4, minWidth: 120 }}>
                     <span style={{ fontSize: 12, color: "#666" }}>Max Select</span>
                     <input
@@ -1147,6 +1391,7 @@ export default function AdminPage() {
                     />
                   </label>
                 </div>
+
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <input type="checkbox" checked={!!groupForm.is_active} onChange={(e) => setGroupForm((f) => ({ ...f, is_active: e.target.checked }))} />
@@ -1200,7 +1445,6 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* Items within selected group */}
           <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <div style={{ fontWeight: 900 }}>Items in Group</div>
@@ -1335,9 +1579,6 @@ export default function AdminPage() {
         </div>
       ) : null}
 
-      {/* ====================================================== */}
-      {/* ASSIGN TAB */}
-      {/* ====================================================== */}
       {tab === "assign" ? (
         <div style={{ marginTop: 14, padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
           <div style={{ fontWeight: 900 }}>Assign Groups to Menu Items</div>
