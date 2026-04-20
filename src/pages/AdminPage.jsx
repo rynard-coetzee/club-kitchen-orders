@@ -11,7 +11,266 @@ export default function AdminPage() {
   const setError = (text) => setMsg({ type: "error", text });
   const setSuccess = (text) => setMsg({ type: "success", text });
   const clearMsg = () => setMsg({ type: "info", text: "" });
+  const [recipeMenuItemId, setRecipeMenuItemId] = useState("");
+  const [recipeItems, setRecipeItems] = useState([]);
+  // ============================================================
+  // RECIPE TAB
+  // ============================================================
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const [newIngredientId, setNewIngredientId] = useState("");
+  const [newQty, setNewQty] = useState("");
+  const [newUnit, setNewUnit] = useState("unit");
+  // ============================================================
+  // MODIFIER RECIPE TAB
+  // ============================================================
+  const [modRecipeItemId, setModRecipeItemId] = useState("");
+  const [modRecipeItems, setModRecipeItems] = useState([]);
+  const [modRecipeLoading, setModRecipeLoading] = useState(false);
 
+  const [modNewIngredientId, setModNewIngredientId] = useState("");
+  const [modNewQty, setModNewQty] = useState("");
+  const [modNewUnit, setModNewUnit] = useState("unit");
+  async function loadModifierRecipe(modifierId) {
+    if (!modifierId) {
+      setModRecipeItems([]);
+      return;
+    }
+
+    setModRecipeLoading(true);
+
+    const { data, error } = await supabase
+      .from("modifier_item_ingredients")
+      .select(`
+        id,
+        ingredient_id,
+        qty,
+        unit,
+        ingredients(name)
+      `)
+      .eq("modifier_item_id", modifierId);
+
+    setModRecipeLoading(false);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setModRecipeItems(data || []);
+  }
+  async function addModifierRecipeItem() {
+    clearMsg();
+
+    if (!modRecipeItemId || !modNewIngredientId || !modNewQty) {
+      setError("Fill all fields");
+      return;
+    }
+
+    const qty = Number(modNewQty);
+    if (qty <= 0) {
+      setError("Invalid quantity");
+      return;
+    }
+
+    // prevent duplicates
+    const exists = modRecipeItems.find(r => r.ingredient_id == modNewIngredientId);
+    if (exists) {
+      setError("Ingredient already added");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("modifier_item_ingredients")
+      .insert({
+        modifier_item_id: modRecipeItemId,
+        ingredient_id: modNewIngredientId,
+        qty,
+        unit: modNewUnit
+      });
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Ingredient added");
+
+    setModNewIngredientId("");
+    setModNewQty("");
+    setModNewUnit("unit");
+
+    loadModifierRecipe(modRecipeItemId);
+  }
+  async function updateModifierRecipeQty(id, qty) {
+    const val = Number(qty);
+    if (!val || val <= 0) return;
+
+    const { error } = await supabase
+      .from("modifier_item_ingredients")
+      .update({ qty: val })
+      .eq("id", id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    loadModifierRecipe(modRecipeItemId);
+  }
+  async function deleteModifierRecipeItem(id) {
+    const { error } = await supabase
+      .from("modifier_item_ingredients")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Removed");
+    loadModifierRecipe(modRecipeItemId);
+  }
+  async function loadRecipe(menuItemId) {
+    if (!menuItemId) {
+      setRecipeItems([]);
+      return;
+    }
+
+    setRecipeLoading(true);
+
+    const { data, error } = await supabase
+      .from("menu_item_ingredients")
+      .select(`
+        id,
+        ingredient_id,
+        qty,
+        unit,
+        ingredients(name)
+      `)
+      .eq("menu_item_id", menuItemId);
+
+    setRecipeLoading(false);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setRecipeItems(data || []);
+  }
+  async function deleteIngredient(id) {
+    clearMsg();
+
+    const { error } = await supabase
+      .from("ingredients")
+      .update({ is_active: false }) // ✅ THIS LINE
+      .eq("id", id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Ingredient removed");
+    loadIngredients();
+  }
+  async function addRecipeItem() {
+    clearMsg();
+
+    if (!recipeMenuItemId || !newIngredientId || !newQty) {
+      setError("Fill all fields");
+      return;
+    }
+
+    const qty = Number(newQty);
+    if (qty <= 0) {
+      setError("Invalid quantity");
+      return;
+    }
+
+    // prevent duplicates
+    const exists = recipeItems.find(r => r.ingredient_id == newIngredientId);
+    if (exists) {
+      setError("Ingredient already added");
+      return;
+    }
+    const ingredient = ingredients.find(i => i.id == newIngredientId);
+
+    if (ingredient && ingredient.unit !== newUnit) {
+      setError(`Unit must match ingredient unit (${ingredient.unit})`);
+      return;
+    }
+    const { error } = await supabase
+      .from("menu_item_ingredients")
+      .insert({
+        menu_item_id: recipeMenuItemId,
+        ingredient_id: newIngredientId,
+        qty,
+        unit: newUnit
+      });
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Ingredient added");
+
+    setNewIngredientId("");
+    setNewQty("");
+    setNewUnit("unit");
+
+    loadRecipe(recipeMenuItemId);
+  }
+  async function updateRecipeQty(id, qty) {
+    const val = Number(qty);
+    if (!val || val <= 0) return;
+
+    const { error } = await supabase
+      .from("menu_item_ingredients")
+      .update({ qty: val })
+      .eq("id", id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    loadRecipe(recipeMenuItemId);
+  }
+  async function addIngredientToRecipe(ingredientId, qty) {
+    if (!recipeMenuItemId) return;
+
+    const { error } = await supabase
+      .from("menu_item_ingredients")
+      .insert({
+        menu_item_id: recipeMenuItemId,
+        ingredient_id: ingredientId,
+        qty: Number(qty),
+      });
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    loadRecipe(recipeMenuItemId);
+  }
+  async function deleteRecipeItem(id) {
+    const { error } = await supabase
+      .from("menu_item_ingredients")
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Removed");
+    loadRecipe(recipeMenuItemId);
+  }
   async function logout() {
     clearMsg();
     const { error } = await supabase.auth.signOut();
@@ -52,6 +311,165 @@ export default function AdminPage() {
   const [categorySaving, setCategorySaving] = useState(false);
   const [categoryEditingId, setCategoryEditingId] = useState(null);
 
+  // =====================
+  // STOCK STATE
+  // =====================
+  const [ingredients, setIngredients] = useState([]);
+  const [ingredientsLoading, setIngredientsLoading] = useState(false);
+
+  const makeEmptyIngredientForm = () => ({
+    id: null,
+    name: "",
+    unit: "unit",
+    cost_per_unit: "",
+    is_active: true,
+  });
+
+  const [ingredientForm, setIngredientForm] = useState(makeEmptyIngredientForm());
+  const [ingredientSaving, setIngredientSaving] = useState(false);
+  const [ingredientEditingId, setIngredientEditingId] = useState(null);
+
+  // stock loading
+  const [stockLoadQty, setStockLoadQty] = useState("");
+  const [stockLoadIngredientId, setStockLoadIngredientId] = useState(null);
+  async function loadIngredients() {
+    const { data, error } = await supabase
+      .from("ingredients")
+      .select(`
+        id,
+        name,
+        unit,
+        cost_per_unit,
+        is_active,
+        stock_movements(change_qty)
+      `)
+      .eq("is_active", true);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    console.log("FULL RAW DATA:", data); // 👈 BIG picture
+
+    const cleaned = (data || []).map((ing) => {
+      console.log("ING RAW:", ing);
+
+      const movements = Array.isArray(ing.stock_movements)
+        ? ing.stock_movements
+        : [];
+
+      console.log("MOVEMENTS:", movements);
+
+      const totalStock = movements.reduce((sum, m) => {
+        const val = Number(m.change_qty || 0);
+        return sum + (isNaN(val) ? 0 : val);
+      }, 0);
+
+      console.log("CALCULATED TOTAL:", totalStock);
+
+      const result = {
+        id: ing.id,
+        name: ing.name,
+        unit: ing.unit,
+        cost_per_unit: ing.cost_per_unit,
+        stock_qty: totalStock,
+      };
+
+      console.log("ING CLEANED:", result); // 👈 FINAL VALUE USED IN UI
+
+      return result;
+    });
+
+    console.log("FINAL CLEANED ARRAY:", cleaned); // 👈 what React receives
+
+    setIngredients(cleaned);
+  }
+  async function saveIngredient(e) {
+    e.preventDefault();
+    setIngredientSaving(true);
+    clearMsg();
+
+    const name = ingredientForm.name.trim();
+    if (!name) {
+      setIngredientSaving(false);
+      setError("Name is required");
+      return;
+    }
+
+    const payload = {
+      name,
+      unit: ingredientForm.unit,
+      cost_per_unit: Number(ingredientForm.cost_per_unit || 0),
+      is_active: !!ingredientForm.is_active,
+    };
+
+    let res;
+    if (ingredientEditingId) {
+      res = await supabase.from("ingredients").update(payload).eq("id", ingredientEditingId);
+    } else {
+      const { data: existing } = await supabase
+        .from("ingredients")
+        .select("id, is_active")
+        .ilike("name", payload.name)
+        .maybeSingle();
+
+      if (existing) {
+        // ✅ revive existing ingredient
+        res = await supabase
+          .from("ingredients")
+          .update({
+            ...payload,
+            is_active: true,
+          })
+          .eq("id", existing.id);
+      } else {
+        // ✅ normal insert
+        res = await supabase
+          .from("ingredients")
+          .insert(payload);
+      }
+    }
+
+    if (res.error) {
+      setIngredientSaving(false);
+      setError(res.error.message);
+      return;
+    }
+
+    setIngredientSaving(false);
+    setSuccess(ingredientEditingId ? "Ingredient updated" : "Ingredient added");
+
+    setIngredientForm(makeEmptyIngredientForm());
+    setIngredientEditingId(null);
+    loadIngredients();
+  }
+  async function addStock(ingredientId) {
+    clearMsg();
+
+    const qty = Number(stockLoadQty);
+    if (!qty || qty <= 0) {
+      setError("Enter valid quantity");
+      return;
+    }
+
+    const { error } = await supabase.from("stock_movements").insert({
+      ingredient_id: ingredientId,
+      change_qty: qty,
+      reason: "purchase",
+    });
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Stock added");
+    setStockLoadQty("");
+    setStockLoadIngredientId(null);
+
+    loadIngredients();
+  }
   async function loadCategories() {
     setCategoriesLoading(true);
     const { data, error } = await supabase
@@ -581,29 +999,28 @@ export default function AdminPage() {
     setGroupsLoading(false);
   }
 
-  async function loadModifierItems(groupId) {
-    if (!groupId) {
-      setModifierItems([]);
-      return;
+  async function loadModifierItems(groupId = null) {
+    setModifierItemsLoading(true);
+
+    let query = supabase
+      .from("modifier_items")
+      .select("id,group_id,name,price_cents,sort_order,is_active");
+
+    if (groupId) {
+      query = query.eq("group_id", groupId);
     }
 
-    setModifierItemsLoading(true);
-    const { data, error } = await supabase
-      .from("modifier_items")
-      .select("id,group_id,name,price_cents,sort_order,is_active")
-      .eq("group_id", groupId)
-      .order("sort_order", { ascending: true })
-      .order("name", { ascending: true });
+    const { data, error } = await query.order("name", { ascending: true });
+
+    setModifierItemsLoading(false);
 
     if (error) {
       setModifierItems([]);
-      setModifierItemsLoading(false);
       setError(`Failed to load modifier_items: ${error.message}`);
       return;
     }
 
     setModifierItems(data || []);
-    setModifierItemsLoading(false);
   }
 
   function startEditGroup(g) {
@@ -917,13 +1334,21 @@ export default function AdminPage() {
     loadGroups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
+  useEffect(() => {
+    if (tab === "stock" || tab === "recipes" || tab === "modifierRecipes") {
+      loadIngredients();
+    }
+  }, [tab])
   useEffect(() => {
     if (tab !== "modifiers") return;
     if (selectedGroupId) loadModifierItems(selectedGroupId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGroupId, tab]);
-
+  useEffect(() => {
+    if (tab === "modifierRecipes") {
+      loadModifierItems(); // 👈 load ALL modifiers
+    }
+  }, [tab]);
   useEffect(() => {
     if (tab !== "assign") return;
     loadAssignments(assignMenuItemId);
@@ -970,6 +1395,9 @@ export default function AdminPage() {
           ["categories", "Categories"],
           ["modifiers", "Extras & Cooking"],
           ["assign", "Assign to Items"],
+          ["stock", "Stock"],
+          ["recipes", "Recipes"],
+          ["modifierRecipes", "Modifier Recipes"],
         ].map(([k, label]) => (
           <button
             key={k}
@@ -1007,7 +1435,270 @@ export default function AdminPage() {
           {msg.text}
         </div>
       ) : null}
+      {tab === "recipes" ? (
+        <div style={{ marginTop: 14, padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
 
+          <div style={{ fontWeight: 900 }}>Recipe Builder</div>
+
+          {/* SELECT MENU ITEM */}
+          <div style={{ marginTop: 12 }}>
+            <select
+              value={recipeMenuItemId}
+              onChange={(e) => {
+                setRecipeMenuItemId(e.target.value);
+                loadRecipe(e.target.value);
+              }}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
+            >
+              <option value="">Select menu item...</option>
+              {menuItems.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* ADD INGREDIENT */}
+          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 8 }}>
+
+            <select
+              value={newIngredientId}
+              onChange={(e) => setNewIngredientId(e.target.value)}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+            >
+              <option value="">Ingredient...</option>
+              {ingredients.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name}
+                </option>
+              ))}
+            </select>
+
+            <input
+              type="number"
+              step="0.01"
+              placeholder="Qty"
+              value={newQty}
+              onChange={(e) => setNewQty(e.target.value)}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+            />
+
+            <select
+              value={newUnit}
+              onChange={(e) => setNewUnit(e.target.value)}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+            >
+              <option value="unit">Unit</option>
+              <option value="g">Gram</option>
+              <option value="ml">ML</option>
+            </select>
+
+            <button
+              onClick={addRecipeItem}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "none",
+                background: "#16a34a",
+                color: "white",
+                fontWeight: 900,
+                cursor: "pointer"
+              }}
+            >
+              Add
+            </button>
+          </div>
+
+          {/* RECIPE LIST */}
+          <div style={{ marginTop: 14 }}>
+            {recipeLoading ? (
+              <div>Loading...</div>
+            ) : recipeItems.length === 0 ? (
+              <div style={{ color: "#666" }}>No ingredients yet</div>
+            ) : (
+              <table style={{ width: "100%", marginTop: 8 }}>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Qty</th>
+                    <th>Unit</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recipeItems.map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.ingredients?.name}</td>
+
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          defaultValue={r.qty}
+                          onBlur={(e) => updateRecipeQty(r.id, e.target.value)}
+                          style={{ width: 80 }}
+                        />
+                      </td>
+
+                      <td>{r.unit}</td>
+
+                      <td>
+                        <button
+                          onClick={() => deleteRecipeItem(r.id)}
+                          style={{
+                            padding: "4px 8px",
+                            borderRadius: 6,
+                            border: "none",
+                            background: "#dc2626",
+                            color: "white",
+                            cursor: "pointer"
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+        </div>
+      ) : null}
+      {tab === "modifierRecipes" ? (
+        <div style={{ marginTop: 14, padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+          
+          <div style={{ fontWeight: 900 }}>Modifier Recipe Builder</div>
+
+          {/* SELECT MODIFIER */}
+          <div style={{ marginTop: 12 }}>
+            <select
+              value={modRecipeItemId}
+              onChange={(e) => {
+                setModRecipeItemId(e.target.value);
+                loadModifierRecipe(e.target.value);
+              }}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
+            >
+              <option value="">Select modifier...</option>
+              {modifierItems.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* ADD INGREDIENT */}
+          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 8 }}>
+            
+            <select
+              value={modNewIngredientId}
+              onChange={(e) => setModNewIngredientId(e.target.value)}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+            >
+              <option value="">Ingredient...</option>
+              {ingredients.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name}
+                </option>
+              ))}
+            </select>
+
+            <input
+              type="number"
+              step="0.01"
+              placeholder="Qty"
+              value={modNewQty}
+              onChange={(e) => setModNewQty(e.target.value)}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+            />
+
+            <select
+              value={modNewUnit}
+              onChange={(e) => setModNewUnit(e.target.value)}
+              style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+            >
+              <option value="unit">Unit</option>
+              <option value="g">Gram</option>
+              <option value="ml">ML</option>
+            </select>
+
+            <button
+              onClick={addModifierRecipeItem}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "none",
+                background: "#16a34a",
+                color: "white",
+                fontWeight: 900,
+                cursor: "pointer"
+              }}
+            >
+              Add
+            </button>
+          </div>
+
+          {/* LIST */}
+          <div style={{ marginTop: 14 }}>
+            {modRecipeLoading ? (
+              <div>Loading...</div>
+            ) : modRecipeItems.length === 0 ? (
+              <div style={{ color: "#666" }}>No ingredients yet</div>
+            ) : (
+              <table style={{ width: "100%", marginTop: 8 }}>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Qty</th>
+                    <th>Unit</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {modRecipeItems.map((r) => (
+                    <tr key={r.id}>
+                      <td>{r.ingredients?.name}</td>
+
+                      <td>
+                        <input
+                          type="number"
+                          step="0.01"
+                          defaultValue={r.qty}
+                          onBlur={(e) => updateModifierRecipeQty(r.id, e.target.value)}
+                          style={{ width: 80 }}
+                        />
+                      </td>
+
+                      <td>{r.unit}</td>
+
+                      <td>
+                        <button
+                          onClick={() => deleteModifierRecipeItem(r.id)}
+                          style={{
+                            padding: "4px 8px",
+                            borderRadius: 6,
+                            border: "none",
+                            background: "#dc2626",
+                            color: "white",
+                            cursor: "pointer"
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+        </div>
+      ) : null}
       {tab === "menu" ? (
         <div style={{ marginTop: 14 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 12 }}>
@@ -1836,6 +2527,143 @@ export default function AdminPage() {
           </div>
         </div>
       ) : null}
+      {/* ====================================================== */}
+      {/* STOCK TAB */}
+      {/* ====================================================== */}
+      {tab === "stock" ? (
+        <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 12 }}>
+          
+          {/* LEFT: Ingredients */}
+          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+            <div style={{ fontWeight: 900 }}>Ingredients</div>
+
+            <table style={{ width: "100%", marginTop: 10 }}>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Stock</th>
+                  <th>Cost</th>
+                  <th></th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {ingredients.map((ing) => (
+                  <tr key={ing.id}>
+                    <td>{ing.name}</td>
+
+                    <td>
+                      {ing.stock_qty}{" "}
+                      <span style={{ color: "#666", fontSize: 12 }}>
+                        {ing.unit}
+                      </span>
+                    </td>
+
+                    <td>R{Number(ing.cost_per_unit).toFixed(2)}</td>
+
+                    <td style={{ display: "flex", gap: 8 }}>
+                      
+                      {/* EXISTING LOAD BUTTON */}
+                      <button
+                        onClick={() => setStockLoadIngredientId(ing.id)}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 8,
+                          border: "1px solid #ddd",
+                          background: "white",
+                          fontWeight: 800,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Load
+                      </button>
+
+                      {/* ✅ NEW DELETE BUTTON */}
+                      <button
+                        onClick={() => {
+                          if (!confirm("Delete this ingredient?")) return;
+                          deleteIngredient(ing.id);
+                        }}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 8,
+                          border: "1px solid #fecaca",
+                          background: "#fff5f5",
+                          color: "#b91c1c",
+                          fontWeight: 900,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Delete
+                      </button>
+
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {stockLoadIngredientId && (
+              <div style={{ marginTop: 10 }}>
+                <input
+                  value={stockLoadQty}
+                  onChange={(e) => setStockLoadQty(e.target.value)}
+                  placeholder="Qty"
+                />
+                <button onClick={() => addStock(stockLoadIngredientId)}>
+                  Add
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT: Add Ingredient */}
+          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+            <div style={{ fontWeight: 900 }}>
+              {ingredientEditingId ? "Edit Ingredient" : "Add Ingredient"}
+            </div>
+
+            <form onSubmit={saveIngredient}>
+              <input
+                placeholder="Name"
+                value={ingredientForm.name}
+                onChange={(e) => setIngredientForm(f => ({ ...f, name: e.target.value }))}
+              />
+
+              <select
+                value={ingredientForm.unit}
+                onChange={(e) =>
+                  setIngredientForm((f) => ({
+                    ...f,
+                    unit: e.target.value
+                  }))
+                }
+                style={{
+                  padding: 8,
+                  borderRadius: 10,
+                  border: "1px solid #ddd"
+                }}
+              >
+                <option value="unit">Unit</option>
+                <option value="g">Gram (g)</option>
+                <option value="ml">Millilitre (ml)</option>
+              </select>
+
+              <input
+                placeholder="Cost"
+                value={ingredientForm.cost_per_unit}
+                onChange={(e) => setIngredientForm(f => ({ ...f, cost_per_unit: e.target.value }))}
+              />
+
+              <button type="submit">
+                Save
+              </button>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+    
     </div>
   );
 }
