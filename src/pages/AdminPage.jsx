@@ -3,10 +3,12 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 
 export default function AdminPage() {
+  const formatName = (name) =>
+    (name || "").replace(/\b\w/g, (c) => c.toUpperCase());
   const nav = useNavigate();
-
+  const [thresholdInputs, setThresholdInputs] = useState({});
+  const [qtyInputs, setQtyInputs] = useState({});
   const [tab, setTab] = useState("menu"); // menu | categories | modifiers | assign
-
   const [msg, setMsg] = useState({ type: "info", text: "" });
   const setError = (text) => setMsg({ type: "error", text });
   const setSuccess = (text) => setMsg({ type: "success", text });
@@ -30,6 +32,59 @@ export default function AdminPage() {
   const [modNewIngredientId, setModNewIngredientId] = useState("");
   const [modNewQty, setModNewQty] = useState("");
   const [modNewUnit, setModNewUnit] = useState("unit");
+  async function loadAllModifierItems() {
+    const { data, error } = await supabase
+      .from("modifier_items")
+      .select("id, name, price_cents")
+      .order("name", { ascending: true });
+
+    if (error) {
+      console.error("Failed to load modifier items:", error);
+      return;
+    }
+
+    setModifierItems(data || []);
+  }
+  async function addStockInline(ingredientId, qty) {
+    console.log("ADDING STOCK:", ingredientId, qty); // 👈 DEBUG
+
+    const { data, error } = await supabase
+      .from("stock_movements")
+      .insert({
+        ingredient_id: ingredientId,
+        change_qty: qty,
+        reason: "purchase",
+      })
+      .select();
+
+    console.log("RESULT:", data, error); // 👈 DEBUG
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Stock added");
+
+    loadIngredients(); // refresh UI
+  }
+  async function updateIngredientCost(id, value) {
+    const cost = Number(value);
+    if (isNaN(cost)) return;
+
+    const { error } = await supabase
+      .from("ingredients")
+      .update({ cost_per_unit: cost })
+      .eq("id", id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setSuccess("Cost updated");
+    loadIngredients();
+  }
   async function loadModifierRecipe(modifierId) {
     if (!modifierId) {
       setModRecipeItems([]);
@@ -158,6 +213,9 @@ export default function AdminPage() {
     }
 
     setRecipeItems(data || []);
+
+    // 🔥 ADD THIS LINE
+    await loadMenuCosts();
   }
   async function deleteIngredient(id) {
     clearMsg();
@@ -222,6 +280,7 @@ export default function AdminPage() {
     setNewUnit("unit");
 
     loadRecipe(recipeMenuItemId);
+    loadMenuCosts();
   }
   async function updateRecipeQty(id, qty) {
     const val = Number(qty);
@@ -238,6 +297,7 @@ export default function AdminPage() {
     }
 
     loadRecipe(recipeMenuItemId);
+    await loadMenuCosts();
   }
   async function addIngredientToRecipe(ingredientId, qty) {
     if (!recipeMenuItemId) return;
@@ -270,6 +330,7 @@ export default function AdminPage() {
 
     setSuccess("Removed");
     loadRecipe(recipeMenuItemId);
+    await loadMenuCosts();
   }
   async function logout() {
     clearMsg();
@@ -315,7 +376,32 @@ export default function AdminPage() {
   // STOCK STATE
   // =====================
   const [ingredients, setIngredients] = useState([]);
+  const totalRecipeCost = recipeItems.reduce((sum, item) => {
+    const ing = ingredients.find(i => i.id === item.ingredient_id);
+
+    if (!ing) return sum;
+
+    const cost =
+      Number(item.qty || 0) *
+      Number(ing.cost_per_unit || 0);
+
+    return sum + cost;
+  }, 0);
+  // ✅ SELECTED MENU ITEM (NOW SAFE)
+  
+  // ✅ MODIFIER COST
+  const totalModifierCost = modRecipeItems.reduce((sum, item) => {
+    const ing = ingredients.find(i => i.id === item.ingredient_id);
+    if (!ing) return sum;
+
+    return sum + (Number(item.qty || 0) * Number(ing.cost_per_unit || 0));
+  }, 0);
   const [ingredientsLoading, setIngredientsLoading] = useState(false);
+  const totalStockValue = ingredients.reduce((sum, ing) => {
+    const qty = Number(ing.stock_qty || 0);
+    const cost = Number(ing.cost_per_unit || 0);
+    return sum + qty * cost;
+  }, 0);
 
   const makeEmptyIngredientForm = () => ({
     id: null,
@@ -340,10 +426,12 @@ export default function AdminPage() {
         name,
         unit,
         cost_per_unit,
+        low_stock_threshold,
         is_active,
         stock_movements(change_qty)
       `)
-      .eq("is_active", true);
+      .eq("is_active", true)
+      .order("name", { ascending: true })
 
     if (error) {
       setError(error.message);
@@ -369,14 +457,11 @@ export default function AdminPage() {
       console.log("CALCULATED TOTAL:", totalStock);
 
       const result = {
-        id: ing.id,
-        name: ing.name,
-        unit: ing.unit,
-        cost_per_unit: ing.cost_per_unit,
+        ...ing, // 🔥 THIS IS THE FIX
         stock_qty: totalStock,
       };
 
-      console.log("ING CLEANED:", result); // 👈 FINAL VALUE USED IN UI
+      console.log("ING CLEANED:", result);
 
       return result;
     });
@@ -405,8 +490,17 @@ export default function AdminPage() {
     };
 
     let res;
+    let newIngredientId = null;
+
     if (ingredientEditingId) {
-      res = await supabase.from("ingredients").update(payload).eq("id", ingredientEditingId);
+      // UPDATE EXISTING
+      res = await supabase
+        .from("ingredients")
+        .update(payload)
+        .eq("id", ingredientEditingId);
+
+      newIngredientId = ingredientEditingId;
+
     } else {
       const { data: existing } = await supabase
         .from("ingredients")
@@ -423,19 +517,52 @@ export default function AdminPage() {
             is_active: true,
           })
           .eq("id", existing.id);
+
+        newIngredientId = existing.id;
+
       } else {
         // ✅ normal insert
-        res = await supabase
+        const { data, error } = await supabase
           .from("ingredients")
-          .insert(payload);
+          .insert(payload)
+          .select()
+          .single();
+
+        res = { error };
+
+        if (data) {
+          newIngredientId = data.id;
+        }
       }
     }
 
+    // ❌ STOP if error
     if (res.error) {
       setIngredientSaving(false);
       setError(res.error.message);
       return;
     }
+
+    // ========================================
+    // ✅ ADD INITIAL STOCK (THIS IS NEW)
+    // ========================================
+    const qty = Number(ingredientForm.qty || 0);
+
+    if (qty > 0 && newIngredientId) {
+      const { error: stockError } = await supabase
+        .from("stock_movements")
+        .insert({
+          ingredient_id: newIngredientId,
+          change_qty: qty,
+          reason: ingredientEditingId ? "adjustment" : "initial_load",
+        });
+
+      if (stockError) {
+        console.error("Stock insert failed:", stockError);
+      }
+    }
+
+    // ========================================
 
     setIngredientSaving(false);
     setSuccess(ingredientEditingId ? "Ingredient updated" : "Ingredient added");
@@ -601,6 +728,21 @@ export default function AdminPage() {
   });
 
   const [menuItems, setMenuItems] = useState([]);
+  const [menuCosts, setMenuCosts] = useState({});
+  const selectedMenuItem = menuItems.find(
+    (m) => m.id === Number(recipeMenuItemId)
+  );
+
+  // ✅ SELLING PRICE
+  const sellingPrice = Number(selectedMenuItem?.price_cents || 0) / 100;
+
+  // ✅ PROFIT + MARGIN
+  const recipeProfit = sellingPrice - totalRecipeCost;
+
+  const recipeMargin =
+    sellingPrice > 0
+      ? (recipeProfit / sellingPrice) * 100
+      : 0;
   const [menuLoading, setMenuLoading] = useState(true);
   const [dragCategoryId, setDragCategoryId] = useState(null);
   const [categoryFilter, setCategoryFilter] = useState("ALL");
@@ -741,7 +883,34 @@ export default function AdminPage() {
   setSuccess("Category order updated.");
   await loadCategories();
 }
+  async function loadMenuCosts() {
+    const { data, error } = await supabase
+      .from("menu_item_ingredients")
+      .select(`
+        menu_item_id,
+        qty,
+        ingredients(cost_per_unit)
+      `);
 
+    if (error) {
+      console.error("Cost load failed:", error);
+      return;
+    }
+
+    const costs = {};
+
+    (data || []).forEach((row) => {
+      const itemId = row.menu_item_id;
+      const qty = Number(row.qty || 0);
+      const costPerUnit = Number(row.ingredients?.cost_per_unit || 0);
+
+      const lineCost = qty * costPerUnit;
+
+      costs[itemId] = (costs[itemId] || 0) + lineCost;
+    });
+
+    setMenuCosts(costs);
+  }
   async function loadMenu() {
     setMenuLoading(true);
     const { data, error } = await supabase
@@ -954,6 +1123,7 @@ export default function AdminPage() {
   const [groupEditingId, setGroupEditingId] = useState(null);
 
   const [modifierItems, setModifierItems] = useState([]);
+  const [modifierCosts, setModifierCosts] = useState({});
   const [modifierItemsLoading, setModifierItemsLoading] = useState(false);
 
   const [modItemForm, setModItemForm] = useState(() => makeEmptyModifierItemForm());
@@ -964,6 +1134,32 @@ export default function AdminPage() {
     if (groupFilterKind === "all" || !hasGroupKind) return groups;
     return groups.filter((g) => String(g.kind || "").toLowerCase() === groupFilterKind);
   }, [groups, groupFilterKind, hasGroupKind]);
+  async function loadModifierCosts() {
+    const { data, error } = await supabase
+      .from("modifier_item_ingredients")
+      .select(`
+        modifier_item_id,
+        qty,
+        ingredients (cost_per_unit)
+      `);
+
+    if (error) {
+      console.error("Modifier cost load failed:", error);
+      return;
+    }
+
+    const costs = {};
+
+    (data || []).forEach((row) => {
+      const id = row.modifier_item_id;
+      const qty = Number(row.qty || 0);
+      const cost = Number(row.ingredients?.cost_per_unit || 0);
+
+      costs[id] = (costs[id] || 0) + qty * cost;
+    });
+
+    setModifierCosts(costs);
+  }
 
   async function loadGroups() {
     setGroupsLoading(true);
@@ -999,28 +1195,35 @@ export default function AdminPage() {
     setGroupsLoading(false);
   }
 
-  async function loadModifierItems(groupId = null) {
-    setModifierItemsLoading(true);
-
-    let query = supabase
-      .from("modifier_items")
-      .select("id,group_id,name,price_cents,sort_order,is_active");
-
-    if (groupId) {
-      query = query.eq("group_id", groupId);
-    }
-
-    const { data, error } = await query.order("name", { ascending: true });
-
-    setModifierItemsLoading(false);
-
-    if (error) {
+  async function loadModifierItems(groupId) {
+    if (!groupId) {
       setModifierItems([]);
-      setError(`Failed to load modifier_items: ${error.message}`);
       return;
     }
 
-    setModifierItems(data || []);
+    const { data, error } = await supabase
+      .from("modifier_group_items")
+      .select(`
+        modifier_item_id,
+        modifier_items (
+          id,
+          name,
+          price_cents,
+          sort_order,
+          is_active
+        )
+      `)
+      .eq("modifier_group_id", groupId);
+
+    if (error) {
+      console.error("Load modifier items error:", error);
+      return;
+    }
+
+    // 🔥 flatten result
+    const items = (data || []).map(d => d.modifier_items);
+
+    setModifierItems(items);
   }
 
   function startEditGroup(g) {
@@ -1202,43 +1405,137 @@ export default function AdminPage() {
     };
 
     let res;
+
     if (modItemEditingId) {
-      res = await supabase.from("modifier_items").update(payload).eq("id", modItemEditingId).select("id").single();
+      // ✅ UPDATE EXISTING (NO group_id here anymore)
+      res = await supabase
+        .from("modifier_items")
+        .update({
+          name: payload.name.toLowerCase(),
+          price_cents: payload.price_cents,
+          sort_order: payload.sort_order,
+          is_active: payload.is_active,
+        })
+        .eq("id", modItemEditingId)
+        .select("id")
+        .single();
+
+      if (res?.error) {
+        setModItemSaving(false);
+        setError(`Save item failed: ${res.error.message}`);
+        return;
+      }
+
+      // also ensure it's linked to the selected group
+      await supabase.from("modifier_group_items").upsert({
+        modifier_group_id: payload.group_id,
+        modifier_item_id: modItemEditingId,
+      });
+
     } else {
-      res = await supabase.from("modifier_items").insert(payload).select("id").single();
+      // ============================================
+      // ✅ PREVENT DUPLICATES + LINK TO GROUP
+      // ============================================
+
+      const cleanName = payload.name.toLowerCase();
+
+      const { data: existing, error: findError } = await supabase
+        .from("modifier_items")
+        .select("id")
+        .eq("name", cleanName)
+        .maybeSingle();
+
+      if (findError) {
+        setModItemSaving(false);
+        setError(findError.message);
+        return;
+      }
+
+      let modifierId;
+
+      if (existing) {
+        modifierId = existing.id;
+
+        await supabase
+          .from("modifier_items")
+          .update({
+            price_cents: payload.price_cents,
+            is_active: true,
+          })
+          .eq("id", modifierId);
+
+      } else {
+        const { data, error } = await supabase
+          .from("modifier_items")
+          .insert({
+            name: cleanName,
+            price_cents: payload.price_cents,
+            sort_order: payload.sort_order,
+            is_active: true,
+          })
+          .select()
+          .single();
+
+        if (error) {
+          setModItemSaving(false);
+          setError(error.message);
+          return;
+        }
+
+        modifierId = data.id;
+      }
+
+      // 🔗 LINK TO GROUP
+      const { error: linkError } = await supabase
+        .from("modifier_group_items")
+        .upsert({
+          modifier_group_id: payload.group_id,
+          modifier_item_id: modifierId,
+        });
+
+      if (linkError) {
+        setModItemSaving(false);
+        setError(linkError.message);
+        return;
+      }
     }
 
-    if (res?.error) {
-      setModItemSaving(false);
-      setError(`Save item failed: ${res.error.message}`);
-      return;
-    }
+    // ============================================
+    // ✅ FINAL SUCCESS (applies to BOTH paths)
+    // ============================================
 
     setModItemSaving(false);
     setSuccess(modItemEditingId ? "Modifier item updated." : "Modifier item added.");
     setModItemEditingId(null);
     setModItemForm({ ...makeEmptyModifierItemForm(), group_id: groupId });
+
     await loadModifierItems(groupId);
   }
-
   async function deleteModItem(it) {
     clearMsg();
-    const ok = window.confirm(`Delete "${it.name}"?`);
+
+    const ok = window.confirm(`Remove "${it.name}" from this group?`);
     if (!ok) return;
 
-    const { error } = await supabase.from("modifier_items").delete().eq("id", it.id);
-    if (error) {
-      setError(`Delete item failed: ${error.message}`);
+    if (!selectedGroupId) {
+      setError("No group selected");
       return;
     }
 
-    if (modItemEditingId === it.id) {
-      setModItemEditingId(null);
-      setModItemForm({ ...makeEmptyModifierItemForm(), group_id: selectedGroupId });
+    const { error } = await supabase
+      .from("modifier_group_items")   // ✅ CORRECT TABLE
+      .delete()
+      .eq("modifier_item_id", it.id)
+      .eq("modifier_group_id", selectedGroupId);
+
+    if (error) {
+      setError(`Remove failed: ${error.message}`);
+      return;
     }
 
-    setSuccess("Modifier item deleted.");
-    await loadModifierItems(it.group_id);
+    setSuccess("Item removed from group");
+
+    await loadModifierItems(selectedGroupId);
   }
 
   // ============================================================
@@ -1331,14 +1628,17 @@ export default function AdminPage() {
   useEffect(() => {
     loadCategories();
     loadMenu();
+    loadMenuCosts();
     loadGroups();
+    loadIngredients();
+    loadModifierCosts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
-    if (tab === "stock" || tab === "recipes" || tab === "modifierRecipes") {
-      loadIngredients();
+    if (tab === "modifierRecipes") {
+      loadAllModifierItems(); // ✅ correct
     }
-  }, [tab])
+  }, [tab]);
   useEffect(() => {
     if (tab !== "modifiers") return;
     if (selectedGroupId) loadModifierItems(selectedGroupId);
@@ -1451,10 +1751,12 @@ export default function AdminPage() {
               style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd", width: "100%" }}
             >
               <option value="">Select menu item...</option>
-              {menuItems.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
+              {[...menuItems]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
               ))}
             </select>
           </div>
@@ -1468,10 +1770,12 @@ export default function AdminPage() {
               style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
             >
               <option value="">Ingredient...</option>
-              {ingredients.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.name}
-                </option>
+              {[...ingredients]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {formatName(i.name)}
+                  </option>
               ))}
             </select>
 
@@ -1517,51 +1821,114 @@ export default function AdminPage() {
             ) : recipeItems.length === 0 ? (
               <div style={{ color: "#666" }}>No ingredients yet</div>
             ) : (
-              <table style={{ width: "100%", marginTop: 8 }}>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Qty</th>
-                    <th>Unit</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recipeItems.map((r) => (
-                    <tr key={r.id}>
-                      <td>{r.ingredients?.name}</td>
-
-                      <td>
-                        <input
-                          type="number"
-                          step="0.01"
-                          defaultValue={r.qty}
-                          onBlur={(e) => updateRecipeQty(r.id, e.target.value)}
-                          style={{ width: 80 }}
-                        />
-                      </td>
-
-                      <td>{r.unit}</td>
-
-                      <td>
-                        <button
-                          onClick={() => deleteRecipeItem(r.id)}
-                          style={{
-                            padding: "4px 8px",
-                            borderRadius: 6,
-                            border: "none",
-                            background: "#dc2626",
-                            color: "white",
-                            cursor: "pointer"
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </td>
+              <>
+                <table style={{ width: "100%", marginTop: 8 }}>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Qty</th>
+                      <th>Unit</th>
+                      <th>Cost</th>
+                      <th></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+
+                  <tbody>
+                    {recipeItems.map((r) => {
+                      const ing = ingredients.find(i => i.id === r.ingredient_id);
+
+                      const cost =
+                        Number(r.qty || 0) *
+                        Number(ing?.cost_per_unit || 0);
+
+                      return (
+                        <tr key={r.id}>
+                          <td>{formatName(r.ingredients?.name)}</td>
+
+                          <td>
+                            <input
+                              type="number"
+                              step="0.01"
+                              defaultValue={r.qty}
+                              onBlur={(e) =>
+                                updateRecipeQty(r.id, e.target.value)
+                              }
+                              style={{ width: 80 }}
+                            />
+                          </td>
+
+                          <td>{r.unit}</td>
+
+                          {/* COST COLUMN */}
+                          <td>R{cost.toFixed(2)}</td>
+
+                          <td>
+                            <button
+                              onClick={() => deleteRecipeItem(r.id)}
+                              style={{
+                                padding: "4px 8px",
+                                borderRadius: 6,
+                                border: "none",
+                                background: "#dc2626",
+                                color: "white",
+                                cursor: "pointer"
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+
+                {/* 🔥 TOTAL COST PANEL */}
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: 12,
+                    borderRadius: 12,
+                    background: "#f8fafc",
+                    border: "1px solid #eee"
+                  }}
+                >
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: 12,
+                      borderRadius: 12,
+                      background: "#f8fafc",
+                      border: "1px solid #eee"
+                    }}
+                  >
+                    <div><strong>Cost:</strong> R{totalRecipeCost.toFixed(2)}</div>
+
+                    <div><strong>Price:</strong> R{sellingPrice.toFixed(2)}</div>
+
+                    <div
+                      style={{
+                        color: recipeProfit < 0 ? "#dc2626" : "#16a34a",
+                        fontWeight: 700
+                      }}
+                    >
+                      <strong>Profit:</strong> R{recipeProfit.toFixed(2)}
+                    </div>
+
+                    <div
+                      style={{
+                        color:
+                          recipeMargin < 30 ? "#dc2626" :
+                          recipeMargin < 60 ? "#f59e0b" :
+                          "#16a34a",
+                        fontWeight: 700
+                      }}
+                    >
+                      <strong>Margin:</strong> {recipeMargin.toFixed(1)}%
+                    </div>
+                  </div>
+                </div>
+              </>
             )}
           </div>
 
@@ -1600,10 +1967,12 @@ export default function AdminPage() {
               style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
             >
               <option value="">Ingredient...</option>
-              {ingredients.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.name}
-                </option>
+              {[...ingredients]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {formatName(i.name)}
+                  </option>
               ))}
             </select>
 
@@ -1655,43 +2024,57 @@ export default function AdminPage() {
                     <th>Name</th>
                     <th>Qty</th>
                     <th>Unit</th>
+                    <th>Cost</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {modRecipeItems.map((r) => (
-                    <tr key={r.id}>
-                      <td>{r.ingredients?.name}</td>
+                  {modRecipeItems.map((r) => {
+                    const ing = ingredients.find(i => i.id === r.ingredient_id);
 
-                      <td>
-                        <input
-                          type="number"
-                          step="0.01"
-                          defaultValue={r.qty}
-                          onBlur={(e) => updateModifierRecipeQty(r.id, e.target.value)}
-                          style={{ width: 80 }}
-                        />
-                      </td>
+                    const cost =
+                      Number(r.qty || 0) *
+                      Number(ing?.cost_per_unit || 0);
 
-                      <td>{r.unit}</td>
+                    return (
+                      <tr key={r.id}>
+                        <td>{formatName(r.ingredients?.name)}</td>
 
-                      <td>
-                        <button
-                          onClick={() => deleteModifierRecipeItem(r.id)}
-                          style={{
-                            padding: "4px 8px",
-                            borderRadius: 6,
-                            border: "none",
-                            background: "#dc2626",
-                            color: "white",
-                            cursor: "pointer"
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                        <td>
+                          <input
+                            type="number"
+                            step="0.01"
+                            defaultValue={r.qty}
+                            onBlur={(e) =>
+                              updateModifierRecipeQty(r.id, e.target.value)
+                            }
+                            style={{ width: 80 }}
+                          />
+                        </td>
+
+                        <td>{r.unit}</td>
+
+                        {/* 🔥 NEW COST COLUMN */}
+                        <td>R{cost.toFixed(2)}</td>
+
+                        <td>
+                          <button
+                            onClick={() => deleteModifierRecipeItem(r.id)}
+                            style={{
+                              padding: "4px 8px",
+                              borderRadius: 6,
+                              border: "none",
+                              background: "#dc2626",
+                              color: "white",
+                              cursor: "pointer"
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
@@ -1743,6 +2126,9 @@ export default function AdminPage() {
                       <th style={{ padding: "8px 6px" }}>Name</th>
                       <th style={{ padding: "8px 6px" }}>Category</th>
                       <th style={{ padding: "8px 6px" }}>Price</th>
+                      <th style={{ padding: "8px 6px" }}>Cost</th>
+                      <th style={{ padding: "8px 6px" }}>Profit</th>
+                      <th style={{ padding: "8px 6px" }}>Margin %</th>
                       <th style={{ padding: "8px 6px" }}>Availability</th>
                       <th style={{ padding: "8px 6px" }}>Sort</th>
                       <th style={{ padding: "8px 6px" }}>Actions</th>
@@ -1764,7 +2150,47 @@ export default function AdminPage() {
                           {it.description ? <div style={{ color: "#666", fontSize: 12 }}>{it.description}</div> : null}
                         </td>
                         <td style={{ padding: "8px 6px" }}>{it.category}</td>
-                        <td style={{ padding: "8px 6px" }}>{centsToDisplay(it.price_cents)}</td>
+                        {(() => {
+                          const price = Number(it.price_cents || 0) / 100;
+                          const cost = Number(menuCosts[it.id] || 0);
+                          const profit = price - cost;
+                          const margin = price > 0 ? (profit / price) * 100 : 0;
+
+                          return (
+                            <>
+                              <td style={{ padding: "8px 6px" }}>
+                                R{price.toFixed(2)}
+                              </td>
+
+                              <td style={{ padding: "8px 6px" }}>
+                                R{cost.toFixed(2)}
+                              </td>
+
+                              <td
+                                style={{
+                                  padding: "8px 6px",
+                                  color: profit < 0 ? "#dc2626" : "#16a34a",
+                                  fontWeight: 800
+                                }}
+                              >
+                                R{profit.toFixed(2)}
+                              </td>
+
+                              <td
+                                style={{
+                                  padding: "8px 6px",
+                                  color:
+                                    margin < 30 ? "#dc2626" :
+                                    margin < 60 ? "#f59e0b" :
+                                    "#16a34a",
+                                  fontWeight: 800
+                                }}
+                              >
+                                {margin.toFixed(1)}%
+                              </td>
+                            </>
+                          );
+                        })()}
                         <td style={{ padding: "8px 6px" }}>
                           <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
                             <AvailabilitySwitch checked={!!it.is_available} onChange={() => toggleMenuAvailability(it)} />
@@ -2322,30 +2748,45 @@ export default function AdminPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {modifierItems.map((it) => (
-                        <tr key={it.id} style={{ borderBottom: "1px solid #f2f2f2" }}>
-                          <td style={{ padding: "8px 6px", fontWeight: 800 }}>{it.name}</td>
-                          <td style={{ padding: "8px 6px" }}>{centsToDisplay(it.price_cents)}</td>
-                          <td style={{ padding: "8px 6px" }}>{it.is_active === false ? "No" : "Yes"}</td>
-                          <td style={{ padding: "8px 6px" }}>{it.sort_order ?? 0}</td>
-                          <td style={{ padding: "8px 6px", display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            <button
-                              type="button"
-                              onClick={() => startEditModItem(it)}
-                              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #ddd", background: "white", fontWeight: 900, cursor: "pointer" }}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => deleteModItem(it)}
-                              style={{ padding: "6px 10px", borderRadius: 10, border: "1px solid #f0c7c7", background: "white", fontWeight: 900, cursor: "pointer" }}
-                            >
-                              Delete
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                      {modifierItems.map((it) => {
+                        const price = Number(it.price_cents || 0) / 100;
+                        const cost = Number(modifierCosts[it.id] || 0);
+                        const profit = price - cost;
+                        const margin = price > 0 ? (profit / price) * 100 : 0;
+
+                        return (
+                          <tr key={it.id}>
+                            <td>{it.name}</td>
+
+                            <td>R{price.toFixed(2)}</td>
+
+                            <td>R{cost.toFixed(2)}</td>
+
+                            <td style={{
+                              color: profit < 0 ? "#dc2626" : "#16a34a",
+                              fontWeight: 700
+                            }}>
+                              R{profit.toFixed(2)}
+                            </td>
+
+                            <td style={{
+                              color:
+                                margin < 30 ? "#dc2626" :
+                                margin < 60 ? "#f59e0b" :
+                                "#16a34a",
+                              fontWeight: 700
+                            }}>
+                              {margin.toFixed(1)}%
+                            </td>
+
+                            <td>
+                              <button onClick={() => deleteModItem(it)}>
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                       {!modifierItemsLoading && modifierItems.length === 0 ? (
                         <tr>
                           <td colSpan={5} style={{ padding: 10, color: "#666" }}>
@@ -2451,10 +2892,12 @@ export default function AdminPage() {
                   style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
                 >
                   <option value="">Select…</option>
-                  {menuItems.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.category ? `${m.category} — ` : ""}{m.name}
-                    </option>
+                  {[...menuItems]
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.category ? `${m.category} — ` : ""}{m.name}
+                      </option>
                   ))}
                 </select>
               </label>
@@ -2540,125 +2983,291 @@ export default function AdminPage() {
             <table style={{ width: "100%", marginTop: 10 }}>
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Stock</th>
-                  <th>Cost</th>
+                  <th></th>
+                  <th style={{ textAlign: "left", padding: "8px 6px" }}>Name</th>
+                  <th style={{ textAlign: "left", padding: "8px 6px" }}>Stock</th>
+                  <th style={{ textAlign: "left", padding: "8px 6px" }}>Cost</th>
+                  <th style={{ textAlign: "left", padding: "8px 6px" }}>QTY</th>
+                  <th style={{ textAlign: "left", padding: "8px 6px" }}>Order Level</th>
                   <th></th>
                 </tr>
               </thead>
 
               <tbody>
-                {ingredients.map((ing) => (
-                  <tr key={ing.id}>
-                    <td>{ing.name}</td>
+                {ingredients.map((ing) => {
+                  
+                  // 🔥 LOW STOCK LOGIC (STEP 4)
+                  const isLow =
+                    Number(ing.low_stock_threshold) > 0 &&
+                    Number(ing.stock_qty) <= Number(ing.low_stock_threshold);
 
-                    <td>
-                      {ing.stock_qty}{" "}
-                      <span style={{ color: "#666", fontSize: 12 }}>
-                        {ing.unit}
-                      </span>
-                    </td>
+                  return (
+                    <tr
+                      key={ing.id}
+                      style={{
+                        background: isLow ? "#ffe5e5" : "white",
+                      }}
+                    >
+                      {/* 🔴🟢 STATUS ICON */}
+                      <td style={{ fontSize: 18 }}>
+                        {isLow ? "🔴" : "🟢"}
+                      </td>
 
-                    <td>R{Number(ing.cost_per_unit).toFixed(2)}</td>
+                      <td>{formatName(ing.name)}</td>
 
-                    <td style={{ display: "flex", gap: 8 }}>
-                      
-                      {/* EXISTING LOAD BUTTON */}
-                      <button
-                        onClick={() => setStockLoadIngredientId(ing.id)}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 8,
-                          border: "1px solid #ddd",
-                          background: "white",
-                          fontWeight: 800,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Load
-                      </button>
+                      <td>
+                        {ing.stock_qty}{" "}
+                        <span style={{ fontSize: 12, color: "#666" }}>
+                          {ing.unit}
+                        </span>
+                      </td>
 
-                      {/* ✅ NEW DELETE BUTTON */}
-                      <button
-                        onClick={() => {
-                          if (!confirm("Delete this ingredient?")) return;
-                          deleteIngredient(ing.id);
-                        }}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 8,
-                          border: "1px solid #fecaca",
-                          background: "#fff5f5",
-                          color: "#b91c1c",
-                          fontWeight: 900,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Delete
-                      </button>
+                      {/* COST */}
+                      <td>
+                        <div style={{ position: "relative", display: "inline-block" }}>
+                          
+                          {/* R prefix */}
+                          <span
+                            style={{
+                              position: "absolute",
+                              left: 8,
+                              top: "50%",
+                              transform: "translateY(-50%)",
+                              color: "#666",
+                              fontSize: 12,
+                              pointerEvents: "none"
+                            }}
+                          >
+                            R
+                          </span>
 
-                    </td>
-                  </tr>
-                ))}
+                          <input
+                            type="number"
+                            step="0.01"
+                            defaultValue={ing.cost_per_unit}
+                            style={{
+                              width: 90,
+                              paddingLeft: 18,
+                            }}
+                            onBlur={(e) =>
+                              updateIngredientCost(ing.id, e.target.value)
+                            }
+                          />
+                        </div>
+                      </td>
+
+                      {/* ADD STOCK */}
+                      <td>
+                        <input
+                          type="number"
+                          placeholder="+"
+                          value={qtyInputs[ing.id] || ""}
+                          style={{ width: 70 }}
+
+                          onChange={(e) => {
+                            const val = e.target.value;
+
+                            setQtyInputs((prev) => ({
+                              ...prev,
+                              [ing.id]: val,
+                            }));
+                          }}
+
+                          onBlur={async () => {
+                            const raw = qtyInputs[ing.id];
+
+                            if (!raw || Number(raw) <= 0) return;
+
+                            await addStockInline(ing.id, Number(raw));
+
+                            setQtyInputs((prev) => ({
+                              ...prev,
+                              [ing.id]: "",
+                            }));
+                          }}
+                        />
+                      </td>
+
+                      {/* REORDER LEVEL */}
+                      <td>
+                        <input
+                          type="number"
+                          placeholder="0"
+                          defaultValue={ing.low_stock_threshold || ""}
+                          style={{ width: 70 }}
+
+                          onFocus={(e) => {
+                            // 👇 clears 0 automatically when user clicks in
+                            if (e.target.value === "0") {
+                              e.target.value = "";
+                            }
+                          }}
+
+                          onBlur={async (e) => {
+                            const raw = e.target.value;
+                            const val = raw === "" ? 0 : Number(raw);
+
+                            console.log("SAVING THRESHOLD:", ing.id, val);
+
+                            const { data, error } = await supabase
+                              .from("ingredients")
+                              .update({ low_stock_threshold: val })
+                              .eq("id", ing.id)
+                              .select();
+
+                            console.log("UPDATE RESULT:", data, error);
+
+                            if (error) {
+                              setError(error.message);
+                              return;
+                            }
+
+                            loadIngredients();
+                          }}
+                        />
+                      </td>
+
+                      {/* DELETE */}
+                      <td>
+                        <button onClick={() => deleteIngredient(ing.id)}>
+                          Delete
+                        </button>
+                      </td>
+
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
 
-            {stockLoadIngredientId && (
-              <div style={{ marginTop: 10 }}>
-                <input
-                  value={stockLoadQty}
-                  onChange={(e) => setStockLoadQty(e.target.value)}
-                  placeholder="Qty"
-                />
-                <button onClick={() => addStock(stockLoadIngredientId)}>
-                  Add
-                </button>
-              </div>
-            )}
+            
           </div>
 
-          {/* RIGHT: Add Ingredient */}
-          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
-            <div style={{ fontWeight: 900 }}>
-              {ingredientEditingId ? "Edit Ingredient" : "Add Ingredient"}
-            </div>
+          {/* RIGHT: Panel Stack */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
 
-            <form onSubmit={saveIngredient}>
-              <input
-                placeholder="Name"
-                value={ingredientForm.name}
-                onChange={(e) => setIngredientForm(f => ({ ...f, name: e.target.value }))}
-              />
+            {/* ========================= */}
+            {/* ADD INGREDIENT */}
+            {/* ========================= */}
+            <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+              
+              <div style={{ fontWeight: 900 }}>
+                {ingredientEditingId ? "Edit Ingredient" : "Add Ingredient"}
+              </div>
 
-              <select
-                value={ingredientForm.unit}
-                onChange={(e) =>
-                  setIngredientForm((f) => ({
-                    ...f,
-                    unit: e.target.value
-                  }))
-                }
-                style={{
-                  padding: 8,
-                  borderRadius: 10,
-                  border: "1px solid #ddd"
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault(); // 👈 THIS STOPS ENTER BREAKING EVERYTHING
+                  saveIngredient(e);
                 }}
               >
-                <option value="unit">Unit</option>
-                <option value="g">Gram (g)</option>
-                <option value="ml">Millilitre (ml)</option>
-              </select>
+                
+                <input
+                  placeholder="Name"
+                  value={ingredientForm.name}
+                  onChange={(e) => setIngredientForm(f => ({ ...f, name: e.target.value }))}
+                />
 
-              <input
-                placeholder="Cost"
-                value={ingredientForm.cost_per_unit}
-                onChange={(e) => setIngredientForm(f => ({ ...f, cost_per_unit: e.target.value }))}
-              />
+                <select
+                  value={ingredientForm.unit}
+                  onChange={(e) =>
+                    setIngredientForm((f) => ({
+                      ...f,
+                      unit: e.target.value
+                    }))
+                  }
+                  style={{ padding: 8, borderRadius: 10, border: "1px solid #ddd" }}
+                >
+                  <option value="unit">Unit</option>
+                  <option value="g">Gram (g)</option>
+                  <option value="ml">Millilitre (ml)</option>
+                </select>
 
-              <button type="submit">
-                Save
-              </button>
-            </form>
+                <input
+                  placeholder="Cost"
+                  value={ingredientForm.cost_per_unit}
+                  onChange={(e) =>
+                    setIngredientForm(f => ({
+                      ...f,
+                      cost_per_unit: e.target.value
+                    }))
+                  }
+                />
+
+                {/* 👇 ADD QTY FIELD HERE */}
+                <input
+                  type="number"
+                  placeholder="Qty"
+                  value={ingredientForm.qty || ""}
+                  onChange={(e) =>
+                    setIngredientForm((f) => ({
+                      ...f,
+                      qty: e.target.value,
+                    }))
+                  }
+                />
+
+                <button type="submit">
+                  Save
+                </button>
+
+              </form>
+            </div>
+
+            {/* ========================= */}
+            {/* STOCK VALUE BLOCK */}
+            {/* ========================= */}
+            <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
+              
+              <div style={{ fontWeight: 900 }}>Stock Value</div>
+
+              <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
+                Total Value
+              </div>
+
+              <div style={{ fontSize: 28, fontWeight: 900, color: "#16a34a" }}>
+                R {totalStockValue.toFixed(2)}
+              </div>
+
+              <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
+                {ingredients.length} items tracked
+              </div>
+
+            </div>
+            <div
+              style={{
+                padding: 12,
+                border: "1px solid #eee",
+                borderRadius: 12,
+                background: "white"
+              }}
+            >
+              <div style={{ fontWeight: 900 }}>
+                ⚠️ Reorder Alerts
+              </div>
+
+              {ingredients
+                .filter(
+                  (ing) =>
+                    Number(ing.low_stock_threshold) > 0 &&
+                    Number(ing.stock_qty) <= Number(ing.low_stock_threshold)
+                )
+                .sort((a, b) => a.stock_qty - b.stock_qty)
+                .map((ing) => (
+                  <div
+                    key={ing.id}
+                    style={{
+                      marginTop: 6,
+                      padding: 6,
+                      borderRadius: 6,
+                      background: "#ffe5e5",
+                      fontSize: 13,
+                    }}
+                  >
+                    🔴 {formatName(ing.name)} ({ing.stock_qty} / {ing.low_stock_threshold})
+                  </div>
+                ))}
+            </div>
           </div>
         </div>
       ) : null}
