@@ -2740,11 +2740,12 @@ export default function AdminPage() {
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr style={{ textAlign: "left", borderBottom: "1px solid #eee" }}>
-                        <th style={{ padding: "8px 6px" }}>Name</th>
-                        <th style={{ padding: "8px 6px" }}>Price</th>
-                        <th style={{ padding: "8px 6px" }}>Active</th>
-                        <th style={{ padding: "8px 6px" }}>Sort</th>
-                        <th style={{ padding: "8px 6px" }}>Actions</th>
+                            <th style={{ textAlign: "left" }}>Name</th>
+                            <th style={{ textAlign: "left" }}>Price</th>
+                            <th style={{ textAlign: "left" }}>Cost</th>
+                            <th style={{ textAlign: "left" }}>Profit</th>
+                            <th style={{ textAlign: "left" }}>Margin %</th>
+                            <th style={{ textAlign: "left" }}>Actions</th>
                       </tr>
                     </thead>
                     <tbody>

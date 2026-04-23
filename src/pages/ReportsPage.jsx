@@ -3,6 +3,29 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 
+function calculateItemCost(it, ingredientsMap, modifierCostMap) {
+  const qty = Number(it.qty || 0);
+
+  // 🔹 BASE COST
+  let baseCost = 0;
+  const recipe = ingredientsMap[it.menu_item_id] || [];
+
+  recipe.forEach(r => {
+    baseCost += (Number(r.qty || 0) * Number(r.cost_per_unit || 0)) * qty;
+  });
+
+  // 🔹 MODIFIER COST
+  let modCost = 0;
+  const { selected } = parseExtrasGroups(it.extras);
+
+  selected.forEach(s => {
+    const cost = Number(modifierCostMap[s.id] || 0);
+    modCost += cost * qty;
+  });
+
+  return baseCost + modCost;
+}
+
 function money(cents) {
   return `R${(Number(cents || 0) / 100).toFixed(2)}`;
 }
@@ -126,9 +149,19 @@ function itemLineTotalCents(it) {
   return base + itemExtrasTotalCents(it);
 }
 
+async function loadIngredientMeta() {
+  const { data } = await supabase
+    .from("ingredients")
+    .select("id, name");
+
+  return data || [];
+}
 export default function ReportsPage() {
   const nav = useNavigate();
-
+  const [ingredientsMap, setIngredientsMap] = useState({});
+  const [modifierCostMap, setModifierCostMap] = useState({});
+  const [ingredientUsage, setIngredientUsage] = useState([]);
+  const [lowStock, setLowStock] = useState([]);
   const [authReady, setAuthReady] = useState(false);
   const [role, setRole] = useState(null);
 
@@ -146,7 +179,43 @@ export default function ReportsPage() {
   const [search, setSearch] = useState("");
 
   const [orders, setOrders] = useState([]);
+  async function loadCostData() {
+    const { data: ingData } = await supabase
+      .from("menu_item_ingredients")
+      .select(`
+        menu_item_id,
+        ingredient_id,
+        qty,
+        ingredients (cost_per_unit)
+      `);
 
+    const ingMap = {};
+    (ingData || []).forEach(r => {
+      if (!ingMap[r.menu_item_id]) ingMap[r.menu_item_id] = [];
+      ingMap[r.menu_item_id].push({
+        ingredient_id: r.ingredient_id,
+        qty: r.qty,
+        cost_per_unit: r.ingredients?.cost_per_unit || 0
+      });
+    });
+
+    const { data: modData } = await supabase
+      .from("modifier_item_ingredients")
+      .select(`
+        modifier_item_id,
+        qty,
+        ingredients (cost_per_unit)
+      `);
+
+    const modMap = {};
+    (modData || []).forEach(r => {
+      const cost = Number(r.qty || 0) * Number(r.ingredients?.cost_per_unit || 0);
+      modMap[r.modifier_item_id] = (modMap[r.modifier_item_id] || 0) + cost;
+    });
+
+    setIngredientsMap(ingMap);
+    setModifierCostMap(modMap);
+  }
   // Staff-only gate
   useEffect(() => {
     let alive = true;
@@ -268,9 +337,11 @@ export default function ReportsPage() {
     if (!authReady) return;
     if (role !== "kitchen" && role !== "waiter" && role !== "admin") return;
     load();
+    loadCostData();
+      
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authReady, role, queryRange.from.getTime(), queryRange.to.getTime()]);
-
+  
   const filtered = useMemo(() => {
     let list = [...orders];
 
@@ -301,13 +372,85 @@ export default function ReportsPage() {
 
     return list;
   }, [orders, statusFilter, typeFilter, search]);
+  console.log("FILTERED LENGTH:", filtered.length);
+  useEffect(() => {
+    async function buildStockReport() {
+      const usage = calculateIngredientUsage();
+      const meta = await loadIngredientMeta();
 
+      const metaMap = {};
+      meta.forEach(i => {
+        metaMap[i.id] = i;
+      });
+
+      const merged = usage.map(u => ({
+        name: metaMap[u.ingredient_id]?.name || "Unknown",
+        used: u.used,
+        stock: 0
+      }));
+
+      setIngredientUsage(merged);
+
+      const low = merged.filter(i => i.stock < 10);
+      setLowStock(low);
+    }
+
+    if (filtered.length > 0) {
+      buildStockReport();
+    }
+  }, [filtered, ingredientsMap]);
+  function calculateIngredientUsage() {
+    const usageMap = new Map();
+
+    for (const o of filtered) {
+      for (const it of o.items || []) {
+        const qty = Number(it.qty || 0);
+
+        const recipe = ingredientsMap[it.menu_item_id] || [];
+
+        recipe.forEach(r => {
+          const used = qty * Number(r.qty || 0);
+
+          if (!usageMap.has(r.ingredient_id)) {
+            usageMap.set(r.ingredient_id, { used: 0 });
+          }
+
+          usageMap.get(r.ingredient_id).used += used;
+        });
+      }
+    }
+
+    return Array.from(usageMap.entries()).map(([id, data]) => ({
+      ingredient_id: id,
+      used: data.used
+    }));
+  }
   const summary = useMemo(() => {
+    let totalRevenue = 0;
+    let totalCost = 0;
+
+    for (const o of filtered) {
+      totalRevenue += Number(o.total_cents || 0) / 100; // ✅ convert to Rands
+
+      for (const it of o.items || []) {
+        totalCost += calculateItemCost(it, ingredientsMap, modifierCostMap); // already in Rands
+      }
+    }
+
     const count = filtered.length;
-    const total = filtered.reduce((sum, o) => sum + Number(o.total_cents || 0), 0);
-    const avg = count ? Math.round(total / count) : 0;
-    return { count, total, avg };
-  }, [filtered]);
+    const avg = count ? (totalRevenue / count) : 0;
+    const profit = totalRevenue - totalCost;
+    const margin = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
+
+    return {
+      count,
+      total: totalRevenue,
+      avg,
+      cost: totalCost,
+      profit,
+      margin
+    };
+  }, [filtered, ingredientsMap, modifierCostMap]);
 
   // ✅ ALL items sold incl modifiers selections
   const topItems = useMemo(() => {
@@ -327,13 +470,10 @@ export default function ReportsPage() {
         const qty = Number(it.qty || 0);
         const unit = Number(it.unit_price_cents || 0);
 
-        // Base item
         addRow(baseName, qty, qty * unit);
 
-        // NEW extras/cooking selections stored in it.extras json
         const { selected } = parseExtrasGroups(it.extras);
         for (const s of selected) {
-          // If you prefer group prefix, use: `${s.group}: ${s.name}`
           addRow(s.name, qty, qty * Number(s.price_cents || 0));
         }
       }
@@ -341,7 +481,29 @@ export default function ReportsPage() {
 
     return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
   }, [filtered]);
+  const topProfitItems = useMemo(() => {
+    const map = new Map();
 
+    for (const o of filtered) {
+      for (const it of o.items || []) {
+        const revenue = itemLineTotalCents(it) / 100; // convert to Rands
+        const cost = calculateItemCost(it, ingredientsMap, modifierCostMap);
+
+        const key = it.name;
+
+        if (!map.has(key)) {
+          map.set(key, { name: key, profit: 0 });
+        }
+
+        map.get(key).profit += (revenue - cost);
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => b.profit - a.profit);
+  }, [filtered, ingredientsMap, modifierCostMap]);
+  const topUsedIngredients = useMemo(() => {
+    return [...ingredientUsage].sort((a, b) => b.used - a.used);
+  }, [ingredientUsage]);
   function exportCSV() {
     const header = ["order_number", "created_at", "status", "order_type", "customer_name", "total", "items"];
 
@@ -530,21 +692,98 @@ export default function ReportsPage() {
       </div>
 
       {/* Summary */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12, marginTop: 14 }}>
         <div style={{ background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
           <div style={{ color: "#666", fontSize: 12 }}>Orders</div>
           <div style={{ fontSize: 26, fontWeight: 950, marginTop: 6 }}>{summary.count}</div>
         </div>
         <div style={{ background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
           <div style={{ color: "#666", fontSize: 12 }}>Revenue</div>
-          <div style={{ fontSize: 26, fontWeight: 950, marginTop: 6 }}>{money(summary.total)}</div>
+          <div style={{ fontSize: 26, fontWeight: 950, marginTop: 6 }}>R{summary.total.toFixed(2)}</div>
         </div>
         <div style={{ background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
           <div style={{ color: "#666", fontSize: 12 }}>Avg order</div>
-          <div style={{ fontSize: 26, fontWeight: 950, marginTop: 6 }}>{money(summary.avg)}</div>
+          <div style={{ fontSize: 26, fontWeight: 950, marginTop: 6 }}>R{summary.avg.toFixed(2)}</div>
+        </div>
+        <div style={{ background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
+          <div style={{ color: "#666", fontSize: 12 }}>Cost</div>
+          <div style={{ fontSize: 26, fontWeight: 950 }}>
+            R{summary.cost.toFixed(2)}
+          </div>
+        </div>
+
+        <div style={{ background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
+          <div style={{ color: "#666", fontSize: 12 }}>Profit</div>
+          <div style={{
+            fontSize: 26,
+            fontWeight: 950,
+            color: summary.profit < 0 ? "red" : "green"
+          }}>
+            R{summary.profit.toFixed(2)}
+          </div>
+        </div>
+
+        <div style={{ background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
+          <div style={{ color: "#666", fontSize: 12 }}>Margin</div>
+          <div style={{
+            fontSize: 26,
+            fontWeight: 950,
+            color:
+              summary.margin < 30 ? "red" :
+              summary.margin < 60 ? "orange" :
+              "green"
+          }}>
+            {summary.margin.toFixed(1)}%
+          </div>
         </div>
       </div>
+      <div style={{ marginTop: 14, background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
+        <h2 style={{ margin: 0 }}>Most Profitable Items</h2>
 
+        {topProfitItems.slice(0, 5).map((it) => (
+          <div key={it.name} style={{ marginTop: 8 }}>
+            {it.name} — <b>R{it.profit.toFixed(2)}</b>
+          </div>
+        ))}
+      </div>
+      <div style={{
+        marginTop: 14,
+        background: "white",
+        border: "1px solid #eee",
+        borderRadius: 14,
+        padding: 12
+      }}>
+        <h2 style={{ margin: 0 }}>Most Used Ingredients</h2>
+
+        {topUsedIngredients.length === 0 && (
+          <div style={{ marginTop: 8 }}>No data available</div>
+        )}
+
+        {topUsedIngredients.slice(0, 5).map((i) => (
+          <div key={i.name} style={{ marginTop: 8 }}>
+            {i.name} — <b>{i.used.toFixed(2)}</b>
+          </div>
+        ))}
+      </div>
+      <div style={{
+        marginTop: 14,
+        background: "#fff7ed",
+        border: "1px solid #fdba74",
+        borderRadius: 14,
+        padding: 12
+      }}>
+        <h2 style={{ margin: 0, color: "#c2410c" }}>Low Stock Warning</h2>
+
+        {lowStock.length === 0 && (
+          <div style={{ marginTop: 8 }}>All stock levels are healthy</div>
+        )}
+
+        {lowStock.map((i) => (
+          <div key={i.name} style={{ marginTop: 8 }}>
+            ⚠️ {i.name} — Stock: <b>{i.stock}</b>
+          </div>
+        ))}
+      </div>
       {/* Items sold (ALL) */}
       <div style={{ marginTop: 14, background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
@@ -567,10 +806,11 @@ export default function ReportsPage() {
                 </div>
               </div>
             ))}
+            
           </div>
         )}
       </div>
-
+      
       {/* Orders list */}
       <div style={{ marginTop: 14, background: "white", border: "1px solid #eee", borderRadius: 14, padding: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
