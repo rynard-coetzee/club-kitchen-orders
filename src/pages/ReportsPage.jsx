@@ -152,7 +152,7 @@ function itemLineTotalCents(it) {
 async function loadIngredientMeta() {
   const { data } = await supabase
     .from("ingredients")
-    .select("id, name");
+    .select("id, name, unit");
 
   return data || [];
 }
@@ -182,20 +182,22 @@ export default function ReportsPage() {
   async function loadCostData() {
     const { data: ingData } = await supabase
       .from("menu_item_ingredients")
-      .select(`
-        menu_item_id,
-        ingredient_id,
-        qty,
-        ingredients (cost_per_unit)
-      `);
+      .select("*");
 
-    const ingMap = {};
+    console.log("ING DATA RAW:", ingData);
+
+    const ingMap = {};  // ✅ THIS WAS MISSING
+
+    // 🔹 ADD MENU ITEM RECIPES
     (ingData || []).forEach(r => {
-      if (!ingMap[r.menu_item_id]) ingMap[r.menu_item_id] = [];
-      ingMap[r.menu_item_id].push({
+      const key = String(r.menu_item_id);
+
+      if (!ingMap[key]) ingMap[key] = [];
+
+      ingMap[key].push({
         ingredient_id: r.ingredient_id,
-        qty: r.qty,
-        cost_per_unit: r.ingredients?.cost_per_unit || 0
+        qty: Number(r.qty || 0),
+        cost_per_unit: 0
       });
     });
 
@@ -203,17 +205,32 @@ export default function ReportsPage() {
       .from("modifier_item_ingredients")
       .select(`
         modifier_item_id,
+        ingredient_id,
         qty,
         ingredients (cost_per_unit)
       `);
 
     const modMap = {};
+
+    // 🔹 ADD MODIFIERS (your existing code)
     (modData || []).forEach(r => {
       const cost = Number(r.qty || 0) * Number(r.ingredients?.cost_per_unit || 0);
       modMap[r.modifier_item_id] = (modMap[r.modifier_item_id] || 0) + cost;
+
+      const key = `mod_${r.modifier_item_id}`;
+
+      if (!ingMap[key]) ingMap[key] = [];
+
+      ingMap[key].push({
+        ingredient_id: r.ingredient_id,
+        qty: r.qty,
+        cost_per_unit: r.ingredients?.cost_per_unit || 0
+      });
     });
 
     setIngredientsMap(ingMap);
+    console.log("ING MAP KEYS:", Object.keys(ingMap).slice(0, 10));
+
     setModifierCostMap(modMap);
   }
   // Staff-only gate
@@ -385,6 +402,7 @@ export default function ReportsPage() {
 
       const merged = usage.map(u => ({
         name: metaMap[u.ingredient_id]?.name || "Unknown",
+        unit: metaMap[u.ingredient_id]?.unit || "",
         used: u.used,
         stock: 0
       }));
@@ -406,7 +424,8 @@ export default function ReportsPage() {
       for (const it of o.items || []) {
         const qty = Number(it.qty || 0);
 
-        const recipe = ingredientsMap[it.menu_item_id] || [];
+        // 🔹 BASE RECIPE INGREDIENTS
+        const recipe = ingredientsMap[String(it.menu_item_id)] || [];
 
         recipe.forEach(r => {
           const used = qty * Number(r.qty || 0);
@@ -417,9 +436,29 @@ export default function ReportsPage() {
 
           usageMap.get(r.ingredient_id).used += used;
         });
+
+        // 🔹 MODIFIER INGREDIENTS (THIS WAS MISSING)
+        const { selected } = parseExtrasGroups(it.extras);
+
+        selected.forEach(s => {
+          const modRecipe = ingredientsMap[`mod_${s.id}`] || []; 
+          // NOTE: we will fix mapping below if needed
+
+          modRecipe.forEach(r => {
+            const used = qty * Number(r.qty || 0);
+
+            if (!usageMap.has(r.ingredient_id)) {
+              usageMap.set(r.ingredient_id, { used: 0 });
+            }
+
+            usageMap.get(r.ingredient_id).used += used;
+          });
+        });
+        console.log("ITEM ID:", it.menu_item_id);
+        console.log("RECIPE FOUND:", ingredientsMap[it.menu_item_id]);
       }
     }
-
+    console.log("USAGE MAP:", usageMap);
     return Array.from(usageMap.entries()).map(([id, data]) => ({
       ingredient_id: id,
       used: data.used
@@ -761,7 +800,7 @@ export default function ReportsPage() {
 
         {topUsedIngredients.slice(0, 5).map((i) => (
           <div key={i.name} style={{ marginTop: 8 }}>
-            {i.name} — <b>{i.used.toFixed(2)}</b>
+            {i.name} — <b>{i.used.toFixed(2)} {i.unit}</b>
           </div>
         ))}
       </div>
