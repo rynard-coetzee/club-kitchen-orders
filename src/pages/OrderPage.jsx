@@ -1349,11 +1349,15 @@ export default function OrderPage() {
             src="/clubhouse-logo.png"
             alt="Clubhouse Kitchen"
             style={{
-              width: 180,
-              maxWidth: "100%",
+              width: 340,
+              maxWidth: "90%",
               height: "auto",
               objectFit: "contain",
               marginBottom: 20,
+              borderRadius: "50%",
+              background: "rgba(255,255,255,0.03)",
+              padding: 10,
+              filter: "drop-shadow(0 10px 25px rgba(0,0,0,0.35))",
             }}
           />
 
@@ -1452,11 +1456,15 @@ export default function OrderPage() {
             src="/clubhouse-logo.png"
             alt="Clubhouse Kitchen"
             style={{
-              width: 180,
-              maxWidth: "100%",
+              width: 200,
+              maxWidth: "90%",
               height: "auto",
               objectFit: "contain",
               marginBottom: 20,
+              borderRadius: "50%",
+              background: "rgba(255,255,255,0.03)",
+              padding: 10,
+              filter: "drop-shadow(0 10px 25px rgba(0,0,0,0.35))",
             }}
           />
           <div>
