@@ -109,6 +109,9 @@ export default function OrderPage() {
   const nameInputRef = useRef(null);															  
   const [menu, setMenu] = useState([]);
   const [menuCategories, setMenuCategories] = useState([]);
+  const [restaurantOpen, setRestaurantOpen] = useState(true);
+  const [closedMessage, setClosedMessage] = useState("");
+  const [loadingSettings, setLoadingSettings] = useState(true);
   // cart line:
   // {
   //   menu_item_id, name, price_cents, qty, item_notes,
@@ -139,9 +142,27 @@ export default function OrderPage() {
   // Mobile layout helper
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 900);
   useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 900);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    async function initializePage() {
+      await loadMenu();
+
+      const { data, error } = await supabase
+        .from("app_settings")
+        .select("restaurant_open, closed_message")
+        .single();
+
+      if (error) {
+        console.error("Could not load app settings:", error);
+      } else if (data) {
+        setRestaurantOpen(data.restaurant_open);
+        setClosedMessage(data.closed_message || "");
+      }
+
+      setLoadingSettings(false);
+    }
+
+    initializePage();
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Patron sound toggle (saved)
@@ -957,10 +978,10 @@ export default function OrderPage() {
             <input
                 ref={nameInputRef}				
                       value={name}
-                onChange2={(e) => {
-                setName(e.target.value);
+                //onChange2={(e) => {
+                //setName(e.target.value);
                 // as user types, keep it responsive — error highlight goes away automatically
-              }}				
+              //}}				
               onChange={(e) => setName(e.target.value)}
               placeholder="Your name (required)"
               style={{
@@ -1294,7 +1315,81 @@ export default function OrderPage() {
       </div>
     </div>
   );
+  if (loadingSettings) {
+    return null;
+  }
 
+  if (!restaurantOpen) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          background: "linear-gradient(135deg, #0f172a 0%, #111827 100%)",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          padding: 20,
+        }}
+      >
+        <div
+          style={{
+            width: "100%",
+            maxWidth: 500,
+            background: "rgba(255,255,255,0.08)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 24,
+            padding: 40,
+            textAlign: "center",
+            color: "white",
+            backdropFilter: "blur(12px)",
+            boxShadow: "0 20px 50px rgba(0,0,0,0.35)",
+          }}
+        >
+          <img
+            src="/clubhouse-logo.png"
+            alt="Clubhouse Kitchen"
+            style={{
+              width: 110,
+              height: 110,
+              objectFit: "cover",
+              borderRadius: 20,
+              marginBottom: 20,
+            }}
+          />
+
+          <div
+            style={{
+              fontSize: 34,
+              marginBottom: 12,
+            }}
+          >
+            🍽️
+          </div>
+
+          <h1
+            style={{
+              margin: 0,
+              fontSize: 32,
+              fontWeight: 900,
+            }}
+          >
+            Kitchen Closed
+          </h1>
+
+          <p
+            style={{
+              marginTop: 18,
+              color: "#d1d5db",
+              fontSize: 16,
+              lineHeight: 1.6,
+            }}
+          >
+            {closedMessage || "We are currently not accepting orders right now."}
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto" }}>
       {/* ✅ Floating Cart button (right side, static) */}

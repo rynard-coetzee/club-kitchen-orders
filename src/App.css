@@ -40,3 +40,18 @@
 .read-the-docs {
   color: #888;
 }
+.stock-table {
+  table-layout: fixed;
+  width: 100%;
+}
+.stock-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stock-table th:nth-child(3),
+.stock-table td:nth-child(3) {
+  background: red !important;
+  min-width: 140px;
+  white-space: nowrap;
+  text-align: right;
+}

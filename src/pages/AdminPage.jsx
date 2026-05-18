@@ -15,6 +15,8 @@ export default function AdminPage() {
   const clearMsg = () => setMsg({ type: "info", text: "" });
   const [recipeMenuItemId, setRecipeMenuItemId] = useState("");
   const [recipeItems, setRecipeItems] = useState([]);
+  const [restaurantOpen, setRestaurantOpen] = useState(true);
+  const [closedMessage, setClosedMessage] = useState("");
   // ============================================================
   // RECIPE TAB
   // ============================================================
@@ -1160,7 +1162,56 @@ export default function AdminPage() {
 
     setModifierCosts(costs);
   }
+  async function loadRestaurantSettings() {
+  const { data, error } = await supabase
+    .from("app_settings")
+    .select("*")
+    .single();
 
+  if (error) {
+    console.error("Failed to load app settings:", error);
+    return;
+  }
+
+  if (data) {
+    setRestaurantOpen(data.restaurant_open);
+    setClosedMessage(data.closed_message || "");
+  }
+}
+
+async function saveRestaurantStatus(open) {
+  setRestaurantOpen(open);
+
+  const { error } = await supabase
+    .from("app_settings")
+    .update({
+      restaurant_open: open,
+      closed_message: closedMessage
+    })
+    .eq("id", 1);
+
+  if (error) {
+    setError(error.message);
+    return;
+  }
+
+  setSuccess(`Restaurant marked as ${open ? "OPEN" : "CLOSED"}`);
+}
+
+async function saveClosedMessage(message) {
+  setClosedMessage(message);
+
+  const { error } = await supabase
+    .from("app_settings")
+    .update({
+      closed_message: message
+    })
+    .eq("id", 1);
+
+  if (error) {
+    setError(error.message);
+  }
+}
   async function loadGroups() {
     setGroupsLoading(true);
 
@@ -1632,6 +1683,7 @@ export default function AdminPage() {
     loadGroups();
     loadIngredients();
     loadModifierCosts();
+    loadRestaurantSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
@@ -1735,6 +1787,60 @@ export default function AdminPage() {
           {msg.text}
         </div>
       ) : null}
+      <div
+        style={{
+          marginTop: 14,
+          padding: 14,
+          border: "1px solid #eee",
+          borderRadius: 12,
+          background: "white"
+        }}
+      >
+        <div style={{ fontWeight: 900, marginBottom: 12 }}>
+          Restaurant Status
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap"
+          }}
+        >
+          <span
+            style={{
+              fontWeight: 700,
+              color: restaurantOpen ? "#16a34a" : "#dc2626"
+            }}
+          >
+            {restaurantOpen ? "OPEN" : "CLOSED"}
+          </span>
+
+          <AvailabilitySwitch
+            checked={restaurantOpen}
+            onChange={() => saveRestaurantStatus(!restaurantOpen)}
+            labelOn="Open"
+            labelOff="Closed"
+          />
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <textarea
+            value={closedMessage}
+            onChange={(e) => saveClosedMessage(e.target.value)}
+            placeholder="Closed message shown to customers..."
+            rows={3}
+            style={{
+              width: "100%",
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              resize: "vertical"
+            }}
+          />
+        </div>
+      </div>
       {tab === "recipes" ? (
         <div style={{ marginTop: 14, padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
 
@@ -2981,7 +3087,7 @@ export default function AdminPage() {
           <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, background: "white" }}>
             <div style={{ fontWeight: 900 }}>Ingredients</div>
 
-            <table style={{ width: "100%", marginTop: 10 }}>
+            <table className="stock-table" style={{ width: "100%", marginTop: 10 }}>
               <thead>
                 <tr>
                   <th></th>
