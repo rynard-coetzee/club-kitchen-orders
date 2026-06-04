@@ -399,7 +399,8 @@ export default function ReportsPage() {
       meta.forEach(i => {
         metaMap[i.id] = i;
       });
-
+      console.log("META SAMPLE:", meta.slice(0, 5));
+      
       const merged = usage.map(u => ({
         name: metaMap[u.ingredient_id]?.name || "Unknown",
         unit: metaMap[u.ingredient_id]?.unit || "",
@@ -408,6 +409,7 @@ export default function ReportsPage() {
         threshold: metaMap[u.ingredient_id]?.low_stock_threshold || 0
       }));
 
+      console.log("MERGED SAMPLE:", merged.slice(0, 10));
       setIngredientUsage(merged);
 
       const low = merged.filter(
