@@ -152,7 +152,7 @@ function itemLineTotalCents(it) {
 async function loadIngredientMeta() {
   const { data } = await supabase
     .from("ingredients")
-    .select("id, name, unit");
+    .select("id, name, unit, stock_qty, low_stock_threshold");
 
   return data || [];
 }
@@ -404,12 +404,15 @@ export default function ReportsPage() {
         name: metaMap[u.ingredient_id]?.name || "Unknown",
         unit: metaMap[u.ingredient_id]?.unit || "",
         used: u.used,
-        stock: 0
+        stock: metaMap[u.ingredient_id]?.stock_qty || 0,
+        threshold: metaMap[u.ingredient_id]?.low_stock_threshold || 0
       }));
 
       setIngredientUsage(merged);
 
-      const low = merged.filter(i => i.stock < 10);
+      const low = merged.filter(
+        i => i.stock <= i.threshold
+      );
       setLowStock(low);
     }
 
