@@ -400,7 +400,7 @@ export default function ReportsPage() {
         metaMap[i.id] = i;
       });
       console.log("META SAMPLE:", meta.slice(0, 5));
-      
+
       const merged = usage.map(u => ({
         name: metaMap[u.ingredient_id]?.name || "Unknown",
         unit: metaMap[u.ingredient_id]?.unit || "",
@@ -412,9 +412,19 @@ export default function ReportsPage() {
       console.log("MERGED SAMPLE:", merged.slice(0, 10));
       setIngredientUsage(merged);
 
-      const low = merged.filter(
-        i => i.stock <= i.threshold
-      );
+      const low = meta
+        .filter(i =>
+          Number(i.stock_qty || 0) <= Number(i.low_stock_threshold || 0)
+        )
+        .map(i => ({
+          name: i.name,
+          stock: i.stock_qty,
+          threshold: i.low_stock_threshold,
+          unit: i.unit
+        }));
+
+      console.log("LOW STOCK:", low);
+
       setLowStock(low);
     }
 
@@ -824,7 +834,7 @@ export default function ReportsPage() {
 
         {lowStock.map((i) => (
           <div key={i.name} style={{ marginTop: 8 }}>
-            ⚠️ {i.name} — Stock: <b>{i.stock}</b>
+            ⚠️ {i.name} — Stock: <b>{i.stock} {i.unit}</b>
           </div>
         ))}
       </div>
