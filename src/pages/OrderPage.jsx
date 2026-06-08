@@ -1404,8 +1404,8 @@ export default function OrderPage() {
           position: "fixed",
           right: 20,
           bottom: 20,
-          width: 60,
-          height: 60,
+          width: 56,
+          height: 56,
           borderRadius: "50%",
           border: "none",
           background: "#111827",
@@ -1415,13 +1415,14 @@ export default function OrderPage() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          fontSize: 24,
+          fontSize: 18,
           zIndex: 9000,
         }}
         title="Go to Cart"
       >
-        <span aria-hidden="true" style={{ fontSize: 18 }}>🛒</span>
-        <span>Cart</span>
+        <span aria-hidden="true" style={{ fontSize: 22 }}>
+          🛒
+        </span>
         <span
           style={{
             position: "absolute",
