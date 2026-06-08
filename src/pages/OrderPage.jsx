@@ -1395,27 +1395,28 @@ export default function OrderPage() {
     );
   }
   return (
-    <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto" }}>
+    <div style={{ fontFamily: "Arial", padding: 16, maxWidth: 980, margin: "0 auto", position: "relative" }}>
       {/* ✅ Floating Cart button (right side, static) */}
       <button
         type="button"
         onClick={scrollToCart}
         style={{
           position: "fixed",
-          right: 14,
-          top: "50%",
-          transform: "translateY(-50%)",
-          zIndex: 9000,
-          border: "1px solid rgba(0,0,0,0.12)",
-          borderRadius: 999,
-          padding: "10px 12px",
-          background: "white",
-          boxShadow: "0 10px 25px rgba(0,0,0,0.14)",
+          right: 20,
+          bottom: 20,
+          width: 60,
+          height: 60,
+          borderRadius: "50%",
+          border: "none",
+          background: "#111827",
+          color: "white",
+          boxShadow: "0 8px 20px rgba(0,0,0,0.25)",
           cursor: "pointer",
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          fontWeight: 950,
+          justifyContent: "center",
+          fontSize: 24,
+          zIndex: 9000,
         }}
         title="Go to Cart"
       >
@@ -1423,13 +1424,20 @@ export default function OrderPage() {
         <span>Cart</span>
         <span
           style={{
-            marginLeft: 4,
-            background: "#111",
+            position: "absolute",
+            top: -4,
+            right: -4,
+            width: 22,
+            height: 22,
+            borderRadius: "50%",
+            background: "#ef4444",
             color: "white",
-            borderRadius: 999,
-            padding: "2px 8px",
             fontSize: 12,
-            fontWeight: 950,
+            fontWeight: 900,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "2px solid white",
           }}
         >
           {cart.reduce((sum, x) => sum + (x.qty || 0), 0)}
@@ -1451,13 +1459,22 @@ export default function OrderPage() {
           boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
         }}
       >
-        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: isMobile ? "column" : "row",
+            gap: 14,
+            alignItems: "center",
+            textAlign: isMobile ? "center" : "left",
+            width: isMobile ? "100%" : "auto",
+          }}
+        >
           <img
             src="/clubhouse-logo.png"
             alt="Clubhouse Kitchen"
             style={{
-              width: 200,
-              maxWidth: "90%",
+              width: "100%",
+              maxWidth: isMobile ? 180 : 140,
               height: "auto",
               objectFit: "contain",
               marginBottom: 20,
