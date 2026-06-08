@@ -1451,7 +1451,7 @@ export default function OrderPage() {
           boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
         }}
       >
-        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
           <img
             src="/clubhouse-logo.png"
             alt="Clubhouse Kitchen"
